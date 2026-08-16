@@ -79,13 +79,27 @@ kubectl label namespace "$NS" --overwrite \
 
 echo "▶ [4/5] 套用 manifest"
 kubectl -n "$NS" apply -f k8s/base/deployment.yaml
-kubectl -n "$NS" apply -f k8s/base/ingress.yaml
 kubectl -n "$NS" set image deployment/demo-app "web=${IMAGE}"
 kubectl -n "$NS" scale deployment/demo-app --replicas="$REPLICAS"
 kubectl -n "$NS" annotate deployment/demo-app \
   "kubernetes.io/change-cause=${BRANCH}@${SHA}" --overwrite >/dev/null
-kubectl -n "$NS" patch ingress demo-app --type=json \
-  -p "[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${HOST}\"}]" >/dev/null
+
+# Ingress 為選用：controller 未就緒時（admission webhook 會拒絕請求）自動略過
+INGRESS_OK=false
+if kubectl get ns ingress-nginx >/dev/null 2>&1; then
+  echo "  · 等待 ingress-nginx controller 就緒…"
+  if kubectl wait --namespace ingress-nginx \
+       --for=condition=ready pod \
+       --selector=app.kubernetes.io/component=controller \
+       --timeout=120s >/dev/null 2>&1; then
+    if kubectl -n "$NS" apply -f k8s/base/ingress.yaml >/dev/null 2>&1; then
+      kubectl -n "$NS" patch ingress demo-app --type=json \
+        -p "[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${HOST}\"}]" >/dev/null
+      INGRESS_OK=true
+    fi
+  fi
+fi
+$INGRESS_OK || echo "  ⚠️  略過 Ingress（controller 未安裝或未就緒），改用 port-forward 存取"
 
 echo "▶ [5/5] 等待滾動更新"
 if ! kubectl -n "$NS" rollout status deployment/demo-app --timeout=180s; then
@@ -99,5 +113,8 @@ echo
 kubectl -n "$NS" get deploy,pod,svc -l app=demo-app
 echo
 echo "✅ 部署完成"
-echo "   http://${HOST}:8080"
-echo "   （Ingress 未安裝時可改用：kubectl -n ${NS} port-forward svc/demo-app 8000:80）"
+if $INGRESS_OK; then
+  echo "   http://${HOST}:8080"
+else
+  echo "   kubectl -n ${NS} port-forward svc/demo-app 8000:80  →  http://localhost:8000"
+fi
