@@ -3288,11 +3288,44 @@ controller 的映像要拉 ~110MB，第一次可能等 30 秒以上。
 `scripts/deploy.sh` 對此做了**優雅降級**：等不到 controller 就跳過 Ingress，改提示用
 `port-forward`，讓部署本身不會因為 Ingress 而失敗。
 
-驗證 Ingress 真的通了：
+**坑 3：先 apply 再 patch host，會被判定為 host 重複**
+
+base manifest 裡的 host 只能有一個預設值。若像下面這樣「先 apply、再 patch 成正確的 host」：
+
+```bash
+kubectl -n dev apply -f k8s/base/ingress.yaml     # host 還是預設的 demo.localtest.me
+kubectl -n dev patch ingress demo-app ...          # 才改成 dev.demo.localtest.me
+```
+
+一旦 prod 已經用掉了 `demo.localtest.me`，`apply` 那一步就會被 webhook 擋下：
+
+```text
+admission webhook "validate.nginx.ingress.kubernetes.io" denied the request:
+host "demo.localtest.me" and path "/" is already defined in ingress prod/demo-app
+```
+
+**正解是在 apply 之前就把 host 換好**（`scripts/deploy.sh` 採用的做法）：
+
+```bash
+TMP_ING="$(mktemp)"
+sed "s|host: .*|host: ${HOST}|" k8s/base/ingress.yaml > "$TMP_ING"
+kubectl -n "$NS" apply -f "$TMP_ING"
+rm -f "$TMP_ING"
+```
+
+> 正式專案請改用 Kustomize 的 overlay 或 Helm 的 values 來做環境差異化，
+> 這裡用 `sed` 是為了讓範例不引入額外工具。
+
+驗證三個環境真的各自獨立：
 
 ```console
-$ curl -s -H "Host: dev.demo.localtest.me" http://localhost:8080/healthz
-ok
+$ for h in dev.demo stg.demo demo; do
+    curl -s -H "Host: ${h}.localtest.me" http://localhost:8080/ | grep -oE '<b>[^<]*</b>|<code>[^<]*</code>'
+  done
+
+dev.demo.localtest.me      1.2.0-dev.0589c2b   develop         dev
+stg.demo.localtest.me      1.1.0-rc.ddf9df0    release/1.1.0   staging
+demo.localtest.me          1.1.0.77f1e19       main            prod
 ```
 
 ### A.5 建立對應 GitFlow 的三個環境
