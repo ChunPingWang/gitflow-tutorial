@@ -1,0 +1,119 @@
+name: "④ hotfix-cd"
+
+# 目標：分鐘級的線上救火通道。檢查較淺，改以嚴格的前置條件與人工審批補回安全性。
+on:
+  push:
+    branches: ['hotfix/**']
+
+concurrency:
+  group: hotfix-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  fast-check:
+    name: 精簡檢查（目標 < 8 分鐘）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - id: v
+        run: echo "version=${GITHUB_REF#refs/heads/hotfix/}" >> $GITHUB_OUTPUT
+
+      - name: ★ hotfix 必須以最新的 main 為基底
+        run: |
+          git fetch origin main
+          BASE=$(git merge-base origin/main HEAD)
+          MAIN=$(git rev-parse origin/main)
+          if [ "$BASE" != "$MAIN" ]; then
+            echo "::error::hotfix 分支不是從最新的 main 開出來的"
+            echo "從 develop 開 hotfix 會把尚未發布的功能一起帶上線。"
+            echo "修正方式：git rebase --onto origin/main \$(git merge-base origin/main HEAD)"
+            exit 1
+          fi
+
+      - name: hotfix 版本號必須是 PATCH 遞增
+        run: |
+          git fetch --tags
+          LAST=$(git describe --tags --abbrev=0 origin/main 2>/dev/null || echo "無")
+          echo "上一版：$LAST → 本次：v${{ steps.v.outputs.version }}"
+          echo "${{ steps.v.outputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[1-9][0-9]*$' || {
+            echo "::error::hotfix 版本號必須是 x.y.Z（PATCH 遞增）"; exit 1; }
+
+      - name: 變更範圍檢查（過大代表這不是 hotfix）
+        run: |
+          git diff --shortstat origin/main...HEAD
+          LINES=$(git diff --numstat origin/main...HEAD | awk '{s+=$1+$2} END {print s+0}')
+          if [ "$LINES" -ge 300 ]; then
+            echo "::warning::hotfix 變更 $LINES 行，超出建議範圍（<300）"
+            echo "請確認這不是偽裝成 hotfix 的 feature —— 那應該走 develop → release 流程"
+          fi
+
+      - name: Unit test + 冒煙測試
+        run: echo "npm run test:unit && npm run test:smoke"
+
+      - name: Secret 掃描（唯一不可省略的安全檢查）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-staging:
+    name: 快速通道部署到 staging
+    runs-on: ubuntu-latest
+    needs: fast-check
+    environment:
+      name: staging
+      url: https://stg.demo.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          echo "kubectl -n staging set image deployment/demo-app web=<registry>/demo-app:hotfix-${GITHUB_SHA::7}"
+          echo "kubectl -n staging rollout status deployment/demo-app --timeout=180s"
+
+  open-sync-prs:
+    name: 自動開立 → main 與 → develop 的 PR
+    runs-on: ubuntu-latest
+    needs: fast-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const head = context.ref.replace('refs/heads/', '');
+            for (const base of ['main', 'develop']) {
+              const { data: ex } = await github.rest.pulls.list({
+                owner: context.repo.owner, repo: context.repo.repo,
+                head: `${context.repo.owner}:${head}`, base, state: 'open',
+              });
+              if (ex.length) { core.info(`${base}: PR 已存在 #${ex[0].number}`); continue; }
+              try {
+                const { data: pr } = await github.rest.pulls.create({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  title: `[Hotfix] ${head} → ${base}`, head, base,
+                  body: [
+                    'Hotfix **必須同時**合併回 `main` 與 `develop`，此 PR 為自動建立。',
+                    '',
+                    '- 只合 `main`：下一版會把修復覆蓋掉（回歸 bug）',
+                    '- 只合 `develop`：線上不會被修復',
+                    '',
+                    '⚠️ 若目前有進行中的 `release/*` 分支，請改合進該 release 分支而非 develop。',
+                  ].join('\n'),
+                });
+                core.info(`${base}: 已建立 PR #${pr.number}`);
+              } catch (e) { core.warning(`${base}: ${e.message}`); }
+            }
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [fast-check, deploy-staging]
+    steps:
+      - run: |
+          echo "🚨 Hotfix v${{ needs.fast-check.outputs.version }} 已部署到 staging"
+          echo "驗證通過後：合併 → main、打 tag（觸發 ⑤ production-release）、並合併 → develop"

@@ -1,0 +1,117 @@
+name: "⑥ nightly-e2e"
+
+# 目標：白天的 pipeline 為了速度而省略的檢查，晚上補齊；並巡檢 GitFlow 本身的健康度。
+on:
+  schedule:
+    - cron: '0 18 * * *'      # UTC 18:00 = 台北 02:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  gitflow-health:
+    name: GitFlow 健康檢查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: main 與 develop 的分歧狀況
+        run: |
+          git fetch origin
+          echo "### main 有但 develop 沒有的 commit（退版風險）"
+          git log --oneline origin/develop..origin/main || true
+          echo "### develop 領先 main 的 commit 數"
+          git rev-list --count origin/main..origin/develop
+
+      - name: 找出長壽 feature 分支（> 7 天）
+        run: |
+          NOW=$(date +%s)
+          git for-each-ref --format='%(refname:short) %(committerdate:unix)' refs/remotes/origin/feature |
+          while read -r br ts; do
+            DAYS=$(( (NOW - ts) / 86400 ))
+            if [ "$DAYS" -gt 7 ]; then
+              echo "::warning::$br 已 $DAYS 天未更新，衝突風險升高，建議合併或關閉"
+            fi
+          done || true
+
+      - name: 檢查是否有多個 release 分支並存
+        run: |
+          N=$(git branch -r --list 'origin/release/*' | wc -l | tr -d ' ')
+          if [ "$N" -gt 1 ]; then
+            echo "::warning::目前有 $N 個 release 分支並存（GitFlow 反模式）"
+            git branch -r --list 'origin/release/*'
+          fi
+
+      - name: 未同步回 develop 的 hotfix
+        run: |
+          for h in $(git branch -r --list 'origin/hotfix/*'); do
+            git merge-base --is-ancestor "$h" origin/develop 2>/dev/null || \
+              echo "::warning::$h 尚未合併回 develop"
+          done || true
+
+      - name: 未合併回 develop 的 tag
+        run: |
+          for t in $(git tag --sort=-creatordate | head -5); do
+            git merge-base --is-ancestor "$t" origin/develop 2>/dev/null || \
+              echo "::warning::tag $t 的內容尚未進入 develop"
+          done || true
+
+  full-regression:
+    name: 多版本 Kubernetes 相容性回歸
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        k8s: [v1.34.0, v1.35.0, v1.36.0]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: nightly-${{ strategy.job-index }}
+          node_image: kindest/node:${{ matrix.k8s }}
+          config: kind-cluster.yaml
+
+      - name: 三個環境全部部署一遍
+        run: |
+          docker build -t demo-app:nightly ./app
+          kind load docker-image demo-app:nightly --name nightly-${{ strategy.job-index }}
+          for NS in dev staging prod; do
+            kubectl create namespace "$NS"
+            kubectl -n "$NS" apply -f k8s/base/deployment.yaml
+            kubectl -n "$NS" set image deployment/demo-app web=demo-app:nightly
+            kubectl -n "$NS" rollout status deployment/demo-app --timeout=240s
+            kubectl -n "$NS" run smoke --image=curlimages/curl:latest --rm -i --restart=Never -- \
+              curl -sf "http://demo-app.${NS}.svc.cluster.local/healthz"
+            echo "✅ $NS on k8s ${{ matrix.k8s }}"
+          done
+
+      - name: 回滾演練（每天驗證回滾機制真的能用）
+        run: |
+          kubectl -n prod set image deployment/demo-app web=demo-app:nightly
+          kubectl -n prod rollout status deployment/demo-app --timeout=180s
+          kubectl -n prod rollout undo deployment/demo-app
+          kubectl -n prod rollout status deployment/demo-app --timeout=180s
+          echo "✅ 回滾機制正常"
+
+  load-test:
+    runs-on: ubuntu-latest
+    needs: full-regression
+    steps:
+      - uses: actions/checkout@v4
+      - name: 長時間負載測試
+        run: echo "k6 run --vus 200 --duration 10m tests/load.js"
+
+  report:
+    runs-on: ubuntu-latest
+    needs: [gitflow-health, full-regression, load-test]
+    if: always()
+    steps:
+      - name: 彙整結果
+        run: |
+          echo "健康檢查：${{ needs.gitflow-health.result }}"
+          echo "相容性回歸：${{ needs.full-regression.result }}"
+          echo "負載測試：${{ needs.load-test.result }}"

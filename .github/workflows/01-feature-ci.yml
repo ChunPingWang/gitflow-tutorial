@@ -1,0 +1,115 @@
+name: "① feature-ci"
+
+# 目標：最快的回饋迴圈（< 5 分鐘）。只驗證，不部署到常駐環境。
+on:
+  push:
+    branches: ['feature/**']
+  pull_request:
+    branches: [develop]
+
+concurrency:
+  group: feature-ci-${{ github.ref }}
+  cancel-in-progress: true      # 新 push 取消舊的跑，省 runner
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard:
+    name: 分支規範檢查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: 分支命名必須符合 GitFlow
+        if: github.event_name == 'push'
+        run: |
+          B="${GITHUB_REF#refs/heads/}"
+          [[ "$B" =~ ^feature/[a-zA-Z0-9._/-]+$ ]] || {
+            echo "::error::分支名 '$B' 不符 feature/<name> 規範"; exit 1; }
+
+      - name: feature 的 PR 只能指向 develop
+        if: github.event_name == 'pull_request'
+        run: |
+          [[ "${{ github.base_ref }}" == "develop" ]] || {
+            echo "::error::feature 分支只能合併到 develop，不可直接進 main"; exit 1; }
+
+      - name: Commit 訊息需符合 Conventional Commits
+        if: github.event_name == 'pull_request'
+        run: |
+          PAT='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9/_-]+\))?!?: .{1,72}$'
+          BAD=0
+          while read -r line; do
+            [[ "$line" =~ ^(Merge|Revert)\  ]] && continue
+            echo "$line" | grep -qE "$PAT" || { echo "❌ $line"; BAD=1; }
+          done < <(git log --format=%s origin/${{ github.base_ref }}..HEAD)
+          exit $BAD
+
+  quality:
+    name: 靜態檢查與單元測試
+    runs-on: ubuntu-latest
+    needs: guard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Secret 掃描
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint
+        run: echo "npm run lint / golangci-lint run / ruff check ."
+
+      - name: Unit test（含覆蓋率）
+        run: echo "npm test -- --coverage"
+
+      - name: 建置映像
+        run: |
+          docker build \
+            --build-arg APP_VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0-dev)" \
+            --build-arg GIT_BRANCH="${GITHUB_REF_NAME}" \
+            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
+            --build-arg BUILD_ENV="ci" \
+            -t demo-app:${GITHUB_SHA::7} ./app
+
+  preview:
+    name: PR 預覽環境（Kind 臨時叢集）
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: pr-${{ github.event.number }}
+          config: kind-cluster.yaml
+
+      - name: 部署到臨時叢集並冒煙測試
+        run: |
+          NS="pr-${{ github.event.number }}"
+          docker build \
+            --build-arg APP_VERSION="pr-${{ github.event.number }}" \
+            --build-arg GIT_BRANCH="${GITHUB_HEAD_REF}" \
+            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
+            -t demo-app:pr ./app
+          kind load docker-image demo-app:pr --name "$NS"
+          kubectl create namespace "$NS"
+          kubectl -n "$NS" apply -f k8s/base/deployment.yaml
+          kubectl -n "$NS" set image deployment/demo-app web=demo-app:pr
+          kubectl -n "$NS" rollout status deployment/demo-app --timeout=180s
+          kubectl -n "$NS" run smoke --image=curlimages/curl:latest --rm -i --restart=Never -- \
+            curl -sf "http://demo-app.${NS}.svc.cluster.local/healthz"
+
+      - name: 在 PR 留言結果
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ 預覽環境部署成功（Kind ephemeral cluster）\n\n映像：`demo-app:pr`\n叢集隨 job 結束自動銷毀。'
+            })

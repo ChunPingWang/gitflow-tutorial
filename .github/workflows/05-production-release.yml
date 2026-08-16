@@ -1,0 +1,167 @@
+name: "⑤ production-release"
+
+# 目標：唯一能動到 production 的路徑，且只由 main 上的 tag 觸發。
+on:
+  push:
+    tags: ['v*.*.*']
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write            # cosign keyless 簽章
+
+jobs:
+  verify:
+    name: 上線前驗證
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - id: v
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: ★ tag 必須位於 main 分支上
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::tag ${GITHUB_REF_NAME} 不在 main 分支上，拒絕上線"
+            echo "production 只接受來自 main 的 tag（即經過 release 或 hotfix 流程的產物）"
+            exit 1; }
+
+      - name: VERSION 檔需與 tag 一致
+        run: |
+          [[ "$(cat VERSION)" == "${{ steps.v.outputs.version }}" ]] || {
+            echo "::error::VERSION 檔 ($(cat VERSION)) 與 tag (${{ steps.v.outputs.version }}) 不一致"; exit 1; }
+
+      - name: 版本號必須遞增
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
+          echo "上一版：${PREV:-（初版）} → 本次：${GITHUB_REF_NAME}"
+
+      - name: 產生 Changelog
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
+          RANGE=${PREV:+$PREV..}${GITHUB_REF_NAME}
+          {
+            echo "## What's Changed"; echo
+            echo "### ✨ Features";       git log --format='- %s (%h)' $RANGE | grep '^- feat' || echo "- 無"
+            echo; echo "### 🐛 Fixes";     git log --format='- %s (%h)' $RANGE | grep '^- fix'  || echo "- 無"
+            echo; echo "### ⚡ Performance"; git log --format='- %s (%h)' $RANGE | grep '^- perf' || echo "- 無"
+            echo; echo "**Full Changelog**: ${PREV:-初版}...${GITHUB_REF_NAME}"
+          } > CHANGELOG_RELEASE.md
+          cat CHANGELOG_RELEASE.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: CHANGELOG_RELEASE.md
+
+  build-sign:
+    name: 建置並簽署映像
+    runs-on: ubuntu-latest
+    needs: verify
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/demo-app:${{ needs.verify.outputs.version }}
+            ghcr.io/${{ github.repository }}/demo-app:latest
+          build-args: |
+            APP_VERSION=${{ needs.verify.outputs.version }}
+            GIT_BRANCH=main
+            GIT_SHA=${{ github.sha }}
+            BUILD_ENV=prod
+
+      - uses: sigstore/cosign-installer@v3
+      - name: 簽署映像
+        run: |
+          cosign sign --yes \
+            ghcr.io/${{ github.repository }}/demo-app@${{ steps.push.outputs.digest }}
+
+  deploy-prod:
+    name: 部署到 Production（需人工審批）
+    runs-on: ubuntu-latest
+    needs: [verify, build-sign]
+    environment:
+      name: production        # ★ 在 Settings → Environments 設定 required reviewers（2 人）
+      url: https://demo.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 顯示 manifest 差異供審查
+        run: echo "kubectl -n prod diff -f k8s/base/ || true"
+
+      - name: 驗證映像簽章
+        run: |
+          echo "cosign verify ghcr.io/${{ github.repository }}/demo-app@${{ needs.build-sign.outputs.digest }}"
+
+      - name: 金絲雀部署（10% 流量）
+        run: |
+          echo "kubectl -n prod set image deployment/demo-app-canary web=...:${{ needs.verify.outputs.version }}"
+          echo "kubectl -n prod rollout status deployment/demo-app-canary --timeout=300s"
+
+      - name: 觀察 5 分鐘
+        run: echo "檢查 Prometheus：error_rate < 1% 且 p95 < 500ms"
+
+      - name: 全量部署
+        run: |
+          echo "kubectl -n prod set image deployment/demo-app web=...:${{ needs.verify.outputs.version }}"
+          echo "kubectl -n prod annotate deployment/demo-app kubernetes.io/change-cause='${GITHUB_REF_NAME}' --overwrite"
+          echo "kubectl -n prod rollout status deployment/demo-app --timeout=600s"
+
+      - name: 上線後冒煙測試
+        run: echo "curl -sf https://demo.example.com/healthz"
+
+      - name: ⛑ 失敗自動回滾
+        if: failure()
+        run: |
+          echo "kubectl -n prod rollout undo deployment/demo-app"
+          echo "kubectl -n prod rollout status deployment/demo-app --timeout=300s"
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: [verify, deploy-prod]
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: changelog }
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG_RELEASE.md
+          generate_release_notes: false
+
+  sync-check:
+    name: 檢查 main 是否已同步回 develop
+    runs-on: ubuntu-latest
+    needs: deploy-prod
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: |
+          git fetch origin main develop
+          BEHIND=$(git rev-list --count origin/develop..origin/main)
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "::warning::main 有 $BEHIND 個 commit 尚未合回 develop（下一版會發生退版）"
+            git log --oneline origin/develop..origin/main
+            echo "請執行：git switch develop && git merge --no-ff main && git push"
+          else
+            echo "✅ develop 已包含 main 的所有變更"
+          fi

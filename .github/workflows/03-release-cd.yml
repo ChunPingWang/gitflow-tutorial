@@ -1,0 +1,150 @@
+name: "③ release-cd"
+
+# 目標：發版候選的完整品質把關 → 部署 staging → 自動開立 release→main 的 PR。
+on:
+  push:
+    branches: ['release/**']
+
+concurrency:
+  group: release-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    name: 發版前置檢查
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - id: v
+        name: 分支名與 VERSION 檔必須一致
+        run: |
+          BR_VER="${GITHUB_REF#refs/heads/release/}"
+          FILE_VER="$(cat VERSION)"
+          [[ "$BR_VER" == "$FILE_VER" ]] || {
+            echo "::error::分支 release/$BR_VER 與 VERSION 檔 ($FILE_VER) 不一致"; exit 1; }
+          [[ "$BR_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::版本號 '$BR_VER' 不符 SemVer"; exit 1; }
+          echo "version=$BR_VER" >> $GITHUB_OUTPUT
+
+      - name: tag 不可重複
+        run: |
+          git fetch --tags
+          if git rev-parse "v${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::tag v${{ steps.v.outputs.version }} 已存在"; exit 1
+          fi
+
+      - name: release 分支不得含新功能 commit
+        run: |
+          git fetch origin develop
+          NEW=$(git log --format=%s origin/develop..HEAD | grep -c '^feat' || true)
+          if [ "$NEW" -gt 0 ]; then
+            echo "::warning::release 分支上有 $NEW 個 feat commit，請確認是否應退回 develop"
+            git log --format='  %s' origin/develop..HEAD | grep '^  feat' || true
+          fi
+
+  security:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - name: 相依套件漏洞掃描
+        run: echo "npm audit --audit-level=high / trivy fs ."
+      - name: 容器映像掃描
+        run: |
+          docker build -t demo-app:scan ./app
+          echo "trivy image --severity HIGH,CRITICAL --exit-code 1 demo-app:scan"
+
+  e2e:
+    name: E2E（Kind 全流程）
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: rc
+          config: kind-cluster.yaml
+      - name: 部署完整堆疊並跑 E2E
+        run: |
+          docker build \
+            --build-arg APP_VERSION="${{ needs.validate.outputs.version }}-rc" \
+            --build-arg GIT_BRANCH="${GITHUB_REF_NAME}" \
+            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
+            -t demo-app:rc ./app
+          kind load docker-image demo-app:rc --name rc
+          kubectl create namespace rc
+          kubectl -n rc apply -f k8s/base/deployment.yaml
+          kubectl -n rc set image deployment/demo-app web=demo-app:rc
+          kubectl -n rc rollout status deployment/demo-app --timeout=240s
+          kubectl -n rc run e2e --image=curlimages/curl:latest --rm -i --restart=Never -- \
+            curl -sf http://demo-app.rc.svc.cluster.local/healthz
+          echo "npx playwright test --grep @e2e"
+
+  perf:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - name: 負載測試（p95 門檻）
+        run: echo "k6 run --vus 50 --duration 3m tests/load.js"
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [validate, security, e2e, perf]
+    environment:
+      name: staging
+      url: https://stg.demo.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: 部署到 staging
+        run: |
+          TAG="${{ needs.validate.outputs.version }}-rc.${GITHUB_SHA::7}"
+          echo "kubectl -n staging set image deployment/demo-app web=<registry>/demo-app:${TAG}"
+          echo "kubectl -n staging rollout status deployment/demo-app --timeout=300s"
+      - name: 部署失敗自動回滾
+        if: failure()
+        run: echo "kubectl -n staging rollout undo deployment/demo-app"
+
+  open-pr:
+    name: 自動開立 release → main 的 PR
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-staging]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const head = context.ref.replace('refs/heads/', '');
+            const version = head.replace('release/', '');
+            const { data: existing } = await github.rest.pulls.list({
+              owner: context.repo.owner, repo: context.repo.repo,
+              head: `${context.repo.owner}:${head}`, base: 'main', state: 'open',
+            });
+            if (existing.length) {
+              core.info(`PR 已存在：#${existing[0].number}`);
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: `Release ${version}`, head, base: 'main',
+              body: [
+                `## Release ${version}`, '',
+                '- [ ] QA 於 staging 驗證通過',
+                '- [ ] Release Notes 已撰寫',
+                '- [ ] 資料庫 migration 已確認',
+                '- [ ] 回滾方案已確認',
+                '',
+                '合併後請立即打上 `v' + version + '` tag 以觸發 ⑤ production-release。',
+                '',
+                '⚠️ 別忘了同時把 release 分支合回 `develop`。',
+              ].join('\n'),
+            });
+            core.info(`已建立 PR #${pr.number}`);

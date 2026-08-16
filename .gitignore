@@ -1,0 +1,25 @@
+# 依賴
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+
+# 建置產物
+dist/
+build/
+target/
+*.log
+
+# 環境與機密（永遠不要 commit）
+.env
+.env.local
+*.pem
+*.key
+secrets.yaml
+kubeconfig
+
+# 編輯器與作業系統
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

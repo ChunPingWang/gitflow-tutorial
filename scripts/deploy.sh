@@ -15,7 +15,8 @@
 #   feature/*      →  不部署（只跑 CI）
 # ------------------------------------------------------------
 
-set -euo pipefail
+set -eu
+# 註：刻意不開 pipefail（見 scenarios/simulate.sh 的說明）
 
 CLUSTER="${KIND_CLUSTER:-gitflow-demo}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
