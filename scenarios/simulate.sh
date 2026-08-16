@@ -14,7 +14,9 @@
 # 相容 bash 3.2（macOS 內建版本）
 # ------------------------------------------------------------
 
-set -uo pipefail
+set -u
+# 註：刻意不開 pipefail —— 「git log | grep -q」中 grep 提早結束會讓 git 收到
+#     SIGPIPE（退出碼 141），開了 pipefail 會把成功的比對誤判成失敗。
 
 SANDBOX="${GITFLOW_SANDBOX:-/tmp/gitflow-sandbox}"
 

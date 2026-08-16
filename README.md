@@ -5,7 +5,12 @@
 
 - **適用對象**：剛接觸 Git 的新手、想導入分支策略的團隊、需要把分支流程接上 CI/CD 的工程師
 - **環境**：macOS / Linux / Windows (WSL2 或 Git Bash)
-- **驗證版本**：Git 2.55、git-flow (AVH) 1.12、Kind 0.30、Kubernetes 1.34
+- **實機驗證環境**：macOS 15 (arm64)、Git 2.55.0、Kind 0.32.0、kubectl 1.36.3、Kubernetes 1.36.1（Colima 提供 Docker runtime）
+
+> 本手冊附帶的三支腳本都經過實機執行驗證：
+> `drills/practice.sh`（12 題演練，驗收邏輯全數通過）、
+> `scenarios/simulate.sh`（26 個情境、39 項自動驗證全綠）、
+> `scripts/deploy.sh`（dev / staging / prod 三個環境實際部署成功）。
 
 ---
 
@@ -25,39 +30,250 @@
 | 10 | [Commit 規範與版本號](#10-commit-規範與版本號) | Conventional Commits / SemVer |
 | 11 | [團隊協作規範](#11-團隊協作規範) | PR / Code Review / 保護分支 |
 | 12 | [分支策略比較](#12-分支策略比較) | GitFlow vs GitHub Flow vs Trunk-Based |
-| 13 | [GitFlow 情境模擬全集](#13-gitflow-情境模擬全集) | ★ 26 種真實場景與處置 SOP |
-| 14 | [多 Pipeline 設計](#14-多-pipeline-設計) | ★ 分支對應的 6 條 CI/CD 流水線 |
+| 13 | [Git 互動演練場](#13-git-互動演練場) | ★ 12 題動手練習，自動驗收 |
+| 14 | [GitFlow 情境模擬全集](#14-gitflow-情境模擬全集) | ★ 26 種真實場景與處置 SOP |
+| 15 | [多 Pipeline 設計](#15-多-pipeline-設計) | ★ 分支對應的 6 條 CI/CD 流水線 |
 | A | [附錄 A：Kind + Kubernetes 部署](#附錄-akind--kubernetes-部署) | 本機叢集與 GitFlow 環境對應 |
 | B | [附錄 B：疑難排解](#附錄-b疑難排解-faq) | 常見錯誤與解法 |
 | C | [附錄 C：指令速查表](#附錄-c指令速查表) | 一頁式 cheat sheet |
 | D | [附錄 D：其他 CI 平台範本](#附錄-d其他-ci-平台範本) | GitLab CI / Jenkins / Argo CD |
 
-### 專案檔案結構
+### 快速開始
 
-執行本手冊的範例後，專案會長成這樣：
+```bash
+# ① 完全新手 —— 從 12 題動手練習開始（只需要 git，不需要 Docker）
+./drills/practice.sh list
+./drills/practice.sh start 1
+
+# ② 想看 GitFlow 各種場景怎麼跑 —— 26 個情境自動演示
+./scenarios/simulate.sh list
+./scenarios/simulate.sh 10          # 最刁鑽的一題：release 期間發生 hotfix
+
+# ③ 想連 CI/CD 一起練 —— 建立本機 K8s 叢集並部署
+kind create cluster --config kind-cluster.yaml
+./scripts/deploy.sh develop         # → dev namespace
+```
+
+### 專案檔案結構
 
 ```text
 git-gitflow-tutorial/
 ├── README.md                      # 本手冊
-├── VERSION                        # 版本號（release/hotfix 會更新）
+├── VERSION                        # 版本號（release / hotfix 會更新）
+├── drills/
+│   └── practice.sh                # ★ 12 題互動演練場（你動手，它驗收）
+├── scenarios/
+│   └── simulate.sh                # ★ 26 種 GitFlow 情境模擬器（自動演示）
 ├── app/
-│   └── Dockerfile                 # 示範應用
-├── k8s/
-│   └── base/
-│       ├── deployment.yaml
-│       └── ingress.yaml
-├── kind-cluster.yaml              # Kind 叢集定義
+│   └── Dockerfile                 # 示範應用（會顯示自己來自哪個分支）
+├── k8s/base/
+│   ├── deployment.yaml
+│   └── ingress.yaml
+├── kind-cluster.yaml              # Kind 叢集定義（1 control-plane + 2 worker）
 ├── scripts/
 │   └── deploy.sh                  # 分支 → namespace 部署腳本
-├── scenarios/
-│   └── simulate.sh                # ★ 26 種 GitFlow 情境模擬器
 └── .github/workflows/             # ★ 6 條獨立 pipeline
-    ├── 01-feature-ci.yml
-    ├── 02-develop-cd.yml
-    ├── 03-release-cd.yml
-    ├── 04-hotfix-cd.yml
-    ├── 05-production-release.yml
-    └── 06-nightly-e2e.yml
+    ├── 01-feature-ci.yml          #   feature/**        → 臨時 Kind 叢集
+    ├── 02-develop-cd.yml          #   develop           → dev
+    ├── 03-release-cd.yml          #   release/**        → staging
+    ├── 04-hotfix-cd.yml           #   hotfix/**         → staging（快速通道）
+    ├── 05-production-release.yml  #   tag v*            → prod（需審批）
+    └── 06-nightly-e2e.yml         #   排程              → 深度回歸
+```
+
+---
+
+## 演練平台架構（C4 Model）
+
+用 [C4 Model](https://c4model.com/) 的四個層級說明這套演練平台本身是怎麼組成的。
+四張圖由外而內：**誰在用 → 有哪些可執行單元 → 單元內部怎麼分工 → 關鍵資料結構**。
+
+### Level 1 — System Context（系統情境）
+
+誰會用這套平台、它跟外部世界的邊界在哪。
+
+```mermaid
+flowchart TB
+    subgraph people["使用者"]
+        L["👤 <b>學習者</b><br/>Git 新手 / 想導入 GitFlow 的工程師"]
+        I["👤 <b>講師 · 團隊 Lead</b><br/>帶教育訓練、制定分支規範"]
+    end
+
+    P["<b>GitFlow 演練平台</b><br/>[Software System]<br/><br/>提供手冊、可驗收的動手練習、<br/>情境模擬與可實際部署的 CI/CD 範例"]
+
+    G["<b>GitHub</b><br/>[External System]<br/>遠端倉庫 · PR · Actions"]
+    D["<b>容器執行環境</b><br/>[External System]<br/>Docker Desktop / Colima"]
+    R["<b>Container Registry</b><br/>[External System]<br/>ghcr.io"]
+
+    L -->|"跑練習、讀手冊、<br/>下 git 指令"| P
+    I -->|"客製情境、<br/>制定 pipeline 規範"| P
+    P -->|"push / PR / 觸發 workflow"| G
+    P -->|"建立 Kind 叢集、<br/>建置映像"| D
+    G -->|"推送與拉取映像"| R
+
+    classDef person fill:#08427b,stroke:#052e56,color:#fff
+    classDef system fill:#1168bd,stroke:#0b4884,color:#fff
+    classDef ext fill:#999,stroke:#6b6b6b,color:#fff
+    class L,I person
+    class P system
+    class G,D,R ext
+```
+
+### Level 2 — Container（可執行單元）
+
+平台內部有哪些「可以獨立跑起來」的單元，彼此怎麼互動。
+
+```mermaid
+flowchart TB
+    L["👤 學習者"]
+
+    subgraph PLATFORM["GitFlow 演練平台"]
+        direction TB
+        RM["📘 <b>README.md</b><br/>[Markdown]<br/>教學手冊 · 指令對照 · Mermaid 圖解"]
+        PR["🎯 <b>practice.sh</b><br/>[Bash]<br/>12 題互動演練場<br/>佈題 → 你動手 → 自動驗收"]
+        SM["🎬 <b>simulate.sh</b><br/>[Bash]<br/>26 個情境模擬器<br/>自動演示 + 39 項斷言"]
+        DP["🚀 <b>deploy.sh</b><br/>[Bash]<br/>分支 → namespace 部署器"]
+        WF["⚙️ <b>.github/workflows/</b><br/>[YAML × 6]<br/>分支各自對應的 CI/CD 流水線"]
+        MF["📦 <b>k8s/base/ + Dockerfile</b><br/>[YAML / Dockerfile]<br/>部署宣告與示範應用"]
+    end
+
+    SB["🗂 <b>沙箱 Repo</b><br/>[Git repo]<br/>/tmp/gitflow-drills/<br/>/tmp/gitflow-sandbox/"]
+    KC["☸️ <b>Kind 叢集</b><br/>[Kubernetes]<br/>ns: dev · staging · prod"]
+
+    L -->|"閱讀"| RM
+    L -->|"start / check / hint"| PR
+    L -->|"執行情境"| SM
+    L -->|"手動部署"| DP
+
+    PR -->|"建立並驗證狀態"| SB
+    SM -->|"建立並驗證狀態"| SB
+    DP -->|"build · kind load · kubectl apply"| KC
+    DP -->|"讀取"| MF
+    WF -->|"CI 中臨時建立叢集"| KC
+    WF -->|"讀取"| MF
+    RM -.->|"引用"| PR
+    RM -.->|"引用"| SM
+    RM -.->|"引用"| DP
+
+    classDef person fill:#08427b,stroke:#052e56,color:#fff
+    classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+    classDef store fill:#438dd5,stroke:#2e6295,color:#fff,stroke-dasharray: 5 3
+    class L person
+    class RM,PR,SM,DP,WF,MF container
+    class SB,KC store
+```
+
+### Level 3 — Component（元件分解）
+
+拆開兩個核心單元的內部結構。
+
+**`practice.sh` — 演練引擎**
+
+```mermaid
+flowchart LR
+    CLI["<b>CLI 派工器</b><br/>main() / case<br/>list · start · check<br/>hint · solve · reset · clean"]
+
+    subgraph ENGINE["每一題的四個函式"]
+        S["<b>setup_N()</b><br/>佈置初始狀態<br/>刻意製造衝突 / 災難現場"]
+        T["<b>task_N()</b><br/>任務說明 + 💡建議<br/>不給答案，給思路"]
+        C["<b>check_N()</b><br/>逐項斷言 + 🎓學習重點<br/>診斷式錯誤訊息"]
+        H["<b>hint_N() / solve_N()</b><br/>提示與完整解答"]
+    end
+
+    HELP["<b>共用工具</b><br/>init_repo · qc<br/>pass · fail · box"]
+    REPO["🗂 /tmp/gitflow-drills/dN"]
+
+    CLI --> S & T & C & H
+    S --> HELP
+    C --> HELP
+    S -->|"寫入"| REPO
+    C -->|"讀取 git 狀態"| REPO
+    H -->|"寫入"| REPO
+
+    classDef comp fill:#85bbf0,stroke:#5d82a8,color:#000
+    classDef store fill:#438dd5,stroke:#2e6295,color:#fff,stroke-dasharray: 5 3
+    class CLI,S,T,C,H,HELP comp
+    class REPO store
+```
+
+**`deploy.sh` — 分支感知部署器**
+
+```mermaid
+flowchart LR
+    IN["<b>輸入</b><br/>分支名（或當前分支）"]
+    RT["<b>① 分支路由</b><br/>case 對應表<br/>決定 ns / replicas / host"]
+    PC["<b>② 前置檢查</b><br/>docker · kind · kubectl<br/>叢集存在？context 正確？"]
+    BD["<b>③ 映像建置</b><br/>docker build --build-arg<br/>版本 · 分支 · SHA 烙進映像"]
+    LD["<b>④ 映像載入</b><br/>kind load docker-image<br/>推進三個節點"]
+    AP["<b>⑤ 套用 Manifest</b><br/>apply · set image · scale<br/>Ingress 為選用（優雅降級）"]
+    RO["<b>⑥ 滾動更新守衛</b><br/>rollout status<br/>失敗 → 自動 rollout undo"]
+
+    IN --> RT --> PC --> BD --> LD --> AP --> RO
+    RO -->|"失敗"| UD["⛑ 自動回滾"]
+
+    classDef comp fill:#85bbf0,stroke:#5d82a8,color:#000
+    classDef danger fill:#f8cecc,stroke:#b85450,color:#000
+    class IN,RT,PC,BD,LD,AP,RO comp
+    class UD danger
+```
+
+### Level 4 — Code（關鍵資料結構）
+
+整套平台的行為，最終收斂到這一張對應表：
+
+```bash
+# scripts/deploy.sh —— 分支路由（唯一的真相來源）
+case "$BRANCH" in
+  main|master) NS=prod    ; REPLICAS=3 ; HOST=demo.localtest.me     ; SUFFIX=""     ;;
+  release/*)   NS=staging ; REPLICAS=2 ; HOST=stg.demo.localtest.me ; SUFFIX="-rc"  ;;
+  hotfix/*)    NS=staging ; REPLICAS=2 ; HOST=stg.demo.localtest.me ; SUFFIX="-hf"  ;;
+  develop)     NS=dev     ; REPLICAS=1 ; HOST=dev.demo.localtest.me ; SUFFIX="-dev" ;;
+  feature/*)   exit 0 ;;   # 只跑 CI，不部署到常駐環境
+  *)           exit 1 ;;   # 不符 GitFlow 命名 → 直接擋下
+esac
+```
+
+| 分支 | Namespace | Replicas | 映像 Tag 樣式 | 對應 Pipeline |
+|------|-----------|----------|---------------|---------------|
+| `main` | `prod` | 3 | `1.1.0.77f1e19` | ⑤ production-release |
+| `release/*` | `staging` | 2 | `1.1.0-rc.ddf9df0` | ③ release-cd |
+| `hotfix/*` | `staging` | 2 | `1.0.1-hf.a3c91b2` | ④ hotfix-cd |
+| `develop` | `dev` | 1 | `1.0.0-dev.d5059e4` | ② develop-cd |
+| `feature/*` | （臨時叢集） | 1 | `pr-<n>` | ① feature-ci |
+
+### 動態視圖：一次完整發版
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as 👤 開發者
+    participant G as GitHub
+    participant P1 as ① feature-ci
+    participant P2 as ② develop-cd
+    participant P3 as ③ release-cd
+    participant P5 as ⑤ production-release
+    participant K as ☸️ Kubernetes
+
+    D->>G: push feature/checkout + 開 PR
+    G->>P1: 觸發
+    P1->>K: 臨時 Kind 叢集部署 + 冒煙測試
+    P1-->>G: ✅ 綠燈，PR 可合併
+    D->>G: 合併 PR → develop
+    G->>P2: 觸發
+    P2->>K: 部署 dev namespace
+    D->>G: 切出 release/1.1.0
+    G->>P3: 觸發
+    P3->>P3: 版本號檢核 · 漏洞掃描 · E2E · 負載測試
+    P3->>K: 部署 staging namespace
+    P3-->>G: 自動開立 release → main 的 PR
+    D->>G: 合併進 main 並打 tag v1.1.0
+    G->>P5: tag 觸發
+    P5->>P5: 驗證 tag 在 main 上 · 簽署映像
+    P5-->>D: ⏸ 等待 2 人審批
+    D-->>P5: 核准
+    P5->>K: 金絲雀 → 全量部署 prod
+    P5-->>G: 發布 Release Notes
+    P5-->>D: ⚠️ 提醒：release 還要合回 develop
 ```
 
 ---
@@ -701,13 +917,13 @@ gitGraph
 
 ```mermaid
 flowchart LR
-    F["feature/*"] -->|CI: build + unit test| PR["Pull Request"]
+    F["feature/*"] -->|"CI: build + unit test"| PR["Pull Request"]
     PR --> D["develop"]
-    D -->|自動部署| DEV["🧪 Dev 環境<br/>k8s ns: dev"]
+    D -->|"自動部署"| DEV["🧪 Dev 環境<br/>k8s ns: dev"]
     D --> R["release/*"]
-    R -->|自動部署| STG["🔍 Staging 環境<br/>k8s ns: staging"]
+    R -->|"自動部署"| STG["🔍 Staging 環境<br/>k8s ns: staging"]
     R --> M["main"]
-    M -->|tag 觸發| PRD["🚀 Production<br/>k8s ns: prod"]
+    M -->|"tag 觸發"| PRD["🚀 Production<br/>k8s ns: prod"]
     M --> H["hotfix/*"]
     H --> M
 ```
@@ -1206,11 +1422,156 @@ Closes #
 
 ---
 
-## 13. GitFlow 情境模擬全集
+## 13. Git 互動演練場
+
+> 前面十二章是「讀」，這一章是「做」。
+> `drills/practice.sh` 會幫你把情境佈置好（包含刻意製造的衝突與災難現場），
+> **指令由你自己下**，再由它逐項驗收並給出診斷式回饋。
+
+### 13.1 怎麼用
+
+```bash
+chmod +x drills/practice.sh
+
+./drills/practice.sh list         # 列出 12 題
+./drills/practice.sh start 5      # 佈置第 5 題並顯示任務
+cd /tmp/gitflow-drills/d5         # ← 在這裡下你自己的 git 指令
+./drills/practice.sh check 5      # 驗收（在哪個目錄執行都可以）
+./drills/practice.sh hint 5       # 卡住時看提示（不含答案）
+./drills/practice.sh solve 5      # 真的想不出來才看解答（會自動做完）
+./drills/practice.sh reset 5      # 重來一次
+./drills/practice.sh clean        # 全部清掉
+```
+
+> 練習全部在 `/tmp/gitflow-drills/` 的沙箱 repo 中進行，**不會動到你任何既有專案**。
+> 只需要 `git`，不需要 Docker 或 Kubernetes。
+
+### 13.2 12 題一覽
+
+| # | 難度 | 練習 | 你會學到 |
+|---|------|------|----------|
+| 1 | ⭐ | 第一個 commit：add / commit / .gitignore | 追蹤與忽略的分界 |
+| 2 | ⭐ | 三大區域：工作目錄 / 暫存區 / 版本庫 | `restore` 與 `restore --staged` 的天壤之別 |
+| 3 | ⭐ | 分支：branch / switch，建立 GitFlow 骨架 | 分支只是指標，開分支近乎零成本 |
+| 4 | ⭐⭐ | 合併：fast-forward vs `--no-ff` | 為什麼 GitFlow 堅持 `--no-ff` |
+| 5 | ⭐⭐ | **★ 製造並解決合併衝突** | 解衝突五步驟、`zdiff3`、`--abort` |
+| 6 | ⭐ | 標籤：annotated vs lightweight | 為何發版一定要 `-a` |
+| 7 | ⭐⭐ | 撤銷三兄弟：restore / reset / revert | 「推出去了沒」決定用哪一個 |
+| 8 | ⭐⭐ | stash：把做到一半的工作收起來 | `-u` 的陷阱、pop vs apply |
+| 9 | ⭐⭐ | cherry-pick：只挑一個 commit | SHA 會變、何時該用它 |
+| 10 | ⭐⭐⭐ | rebase：把分支換基底 | rebase 黃金法則、何時該改用 merge |
+| 11 | ⭐⭐ | reflog：救回 `reset --hard` 掉的 commit | Git 幾乎刪不掉東西 |
+| 12 | ⭐⭐⭐ | **★ 完整 GitFlow 小循環（總複習）** | feature → release → main + tag → develop |
+
+### 13.3 實際長什麼樣
+
+以最重要的**第 5 題（衝突處理）**為例：
+
+```console
+$ ./drills/practice.sh start 5
+
+┌────────────────────────────────────────────────────────────┐
+│ 練習 5  ⭐⭐  ★ 製造並解決合併衝突                            │
+└────────────────────────────────────────────────────────────┘
+
+📋 任務
+  develop 與 feature/discount 改到了同一個檔案的相鄰行：
+    · develop           freeShipping: 1000 → 500
+    · feature/discount  discount: 0.1 → 0.2
+
+  請在 develop 上執行 --no-ff 合併，解決衝突，
+  最終 pricing.js 必須同時保留兩邊的修改：
+    discount: 0.2  且  freeShipping: 500
+
+💡 建議
+  解衝突的順序永遠是這五步：
+    1. git status                      看哪些檔案卡住（Unmerged paths）
+    2. 編輯檔案                        刪掉 <<<<<<< ======= >>>>>>> 三種標記
+    3. git add <file>                  標記為已解決
+    4. git status                      確認沒有遺漏
+    5. git commit                      完成合併（訊息已預填）
+
+  做錯了不用怕：git merge --abort 隨時可以回到合併前，什麼都沒發生。
+
+📂 練習目錄：/tmp/gitflow-drills/d5
+   cd /tmp/gitflow-drills/d5
+```
+
+自己動手之後驗收：
+
+```console
+$ ./drills/practice.sh check 5
+
+┌────────────────────────────────────────────────────────────┐
+│ 驗收：練習 5  ★ 製造並解決合併衝突                           │
+└────────────────────────────────────────────────────────────┘
+  ✔ 沒有殘留的衝突標記
+  ✔ 保留了 feature 的修改（discount: 0.2）
+  ✔ 保留了 develop 的修改（freeShipping: 500）
+  ✔ HEAD 是合併節點
+
+🎓 學習重點
+  衝突不是錯誤，是 Git 在說「這兩個改動我不敢替你決定」。
+  它只比對文字，不理解語意 —— 所以解完一定要跑測試。
+
+🎉 全部通過！
+   下一題：./drills/practice.sh start 6
+```
+
+驗收訊息是**診斷式**的，做錯時會直接告訴你錯在哪個觀念：
+
+```text
+✘ HEAD 不是合併節點 —— 你可能做成了 fast-forward（少了 --no-ff）
+✘ conf.txt 的修改被丟掉了 —— --staged 參數不能省
+✘ wip.txt 不見了 —— stash 時少了 -u，未追蹤檔案沒被收進去
+✘ 壞 commit 從歷史中消失了 —— 你用了 reset，但題目說它已經推出去了
+✘ ★ release 沒有合回 develop —— 這是 GitFlow 最常見的錯誤（下一版會退版）
+```
+
+### 13.4 給初學者的學習路線
+
+```mermaid
+flowchart LR
+    A["<b>第 1 天</b><br/>練習 1-3<br/>add / commit / branch"]
+    B["<b>第 2 天</b><br/>練習 4-6<br/>merge / 衝突 / tag"]
+    C["<b>第 3 天</b><br/>練習 7-9<br/>撤銷 / stash / cherry-pick"]
+    D["<b>第 4 天</b><br/>練習 10-12<br/>rebase / reflog / GitFlow"]
+    E["<b>第 5 天</b><br/>情境模擬 1-13<br/>正常流程與時序交錯"]
+    F["<b>第 6 天</b><br/>情境模擬 14-26<br/>異常救援與團隊協作"]
+    G["<b>第 7 天</b><br/>Kind + CI/CD<br/>附錄 A · 第 15 章"]
+
+    A --> B --> C --> D --> E --> F --> G
+```
+
+**六個建議**
+
+1. **每個動作前後都 `git status`。** 新手九成的混亂，來自不知道自己現在在哪個狀態。
+2. **把 `git log --oneline --graph --decorate --all` 設成別名。** 看得到圖，觀念才立得起來。
+3. **刻意把事情搞砸，再救回來。** 練習 11 就是為此設計的 —— 知道救得回來，你才敢用 Git。
+4. **先學會 `--abort`，再學那個指令本身。** `merge --abort`、`rebase --abort`、`cherry-pick --abort` 是你的安全網。
+5. **commit 要小而頻繁。** Git 唯一救不回來的，是你從未 commit 過的東西。
+6. **先分辨「推出去了沒」，再決定用 reset 還是 revert。** 這一題答錯，會害到整個團隊。
+
+**新手最常見的五個誤解**
+
+| 誤解 | 真相 |
+|------|------|
+| 「commit 就等於備份到雲端」 | commit 只寫在本機 `.git`，要 `push` 才會上遠端 |
+| 「.gitignore 可以擋掉任何檔案」 | 對**已追蹤**的檔案無效，要先 `git rm --cached` |
+| 「衝突代表我做錯了」 | 衝突是正常的協作結果，Git 只是不敢替你決定 |
+| 「`reset --hard` 之後就沒救了」 | `git reflog` 幾乎都救得回來（預設保留 90 天） |
+| 「rebase 比 merge 高級，應該都用 rebase」 | 共用分支上 rebase 會害慘同事，見練習 10 |
+
+---
+
+## 14. GitFlow 情境模擬全集
 
 > 這一章把 GitFlow 在真實專案裡會遇到的狀況分成 6 類、26 個情境，
 > 每個情境都有**背景 → 操作 → 重點**，指令可直接複製執行。
-> 全部情境都能用 `./scenarios/simulate.sh <編號>` 在沙箱 repo 中實際跑一遍（見 [13.7](#137-情境模擬器)）。
+> 全部情境都能用 `./scenarios/simulate.sh <編號>` 在沙箱 repo 中實際跑一遍（見 [14.7](#147-情境模擬器)）。
+>
+> 與[第 13 章](#13-git-互動演練場)的差別：
+> **演練場是你動手**（練基本功）；**模擬器是自動演示**（看複雜時序怎麼走）。
 
 | 類別 | 情境 | 難度 |
 |------|------|------|
@@ -1948,7 +2309,7 @@ git push --force-with-lease
 
 ---
 
-### 13.7 情境模擬器
+### 14.7 情境模擬器
 
 本專案附帶 `scenarios/simulate.sh`，會在 `/tmp/gitflow-sandbox/` 建立乾淨的沙箱 repo，
 把上述情境真的跑一次（含衝突、救援與驗證），**不會動到你任何既有的專案**。
@@ -1963,32 +2324,55 @@ chmod +x scenarios/simulate.sh
 ./scenarios/simulate.sh clean       # 清掉沙箱
 ```
 
-每個情境結束會印出：
+每個情境會**自我驗證**（全 26 個情境共 39 項斷言，實機執行全數通過）。
+以最關鍵的情境 10 為例，實際輸出：
 
-```text
-════════════════════════════════════════════════════════════
- 情境 10：release 進行中發生 hotfix
-════════════════════════════════════════════════════════════
-▶ 從 main 建立 hotfix/1.1.1
-▶ 合併 hotfix → main（打 tag v1.1.1）
-▶ 合併 hotfix → release/1.2.0   ← 關鍵步驟
-✔ 驗證：release/1.2.0 已包含 hotfix 修正
-✔ 驗證：release 完成後 develop 也含有此修正
+```console
+$ ./scenarios/simulate.sh 10
 
-*   Merge branch 'hotfix/1.1.1' into release/1.2.0
+════════════════════════════════════════════════════════════
+ 情境 10：release 進行中發生 hotfix（★ 最容易做錯）
+════════════════════════════════════════════════════════════
+▶ 切出 release/1.1.0，QA 進行中
+▶ 此時線上 v1.0.0 出事 → 從 main 開 hotfix/1.0.1
+▶ ① hotfix → main + tag（先救火）
+▶ ② hotfix → release/1.1.0 （★ 關鍵：不是 develop！）
+✔ 驗證：release/1.1.0 已包含 hotfix 修正
+▶ ③ release 完成 → main + develop
+✔ 驗證：v1.1.0 上線後仍保有 hotfix（沒有回歸）
+✔ 驗證：develop 也透過 release 拿到修正
+
+--- git log --oneline --graph --all ---
+*   Merge branch 'release/1.1.0' into develop
 |\
-| * fix: 線上緊急修復
+| *   Merge branch 'hotfix/1.0.1' into release/1.1.0
+| |\
+| | * fix: 線上緊急修復
 ...
+
+⚠ 若步驟 ② 改成合進 develop 而非 release，v1.1.0 上線時會把 hotfix 覆蓋掉 → 回歸 bug
 ```
+
+**推薦的閱讀／執行順序**
+
+| 你的情況 | 建議跑哪幾個 |
+|----------|-------------|
+| 剛學會 GitFlow，想確認自己理解正確 | `1 2 3 4` |
+| 準備第一次帶 release | `3 9 13` |
+| 準備第一次處理線上事故 | `4 10 11` |
+| 團隊常發生合併地獄 | `5 6 7 8 26` |
+| 有人把 main 搞壞了 | `15 16 17 19` |
+| 要開始維護多個版本 | `21 22 23` |
+| **只挑一個看** | `10`（release 期間的 hotfix，最容易做錯） |
 
 ---
 
-## 14. 多 Pipeline 設計
+## 15. 多 Pipeline 設計
 
 GitFlow 的每種分支有不同的**風險等級**與**目的**，因此不該共用同一條 pipeline。
 本章把 CI/CD 拆成 **6 條獨立流水線**，各自有不同的觸發條件、檢查強度與審批要求。
 
-### 14.1 全景圖
+### 15.1 全景圖
 
 ```mermaid
 flowchart TB
@@ -2021,13 +2405,13 @@ flowchart TB
     R --> P3 --> E2
     H --> P4 --> E2
     M --> P5 --> E3
-    D -.->|排程| P6 --> E0
+    D -.->|"排程"| P6 --> E0
 
     style P5 fill:#ffe0e0
     style E3 fill:#ffe0e0
 ```
 
-### 14.2 Pipeline 矩陣
+### 15.2 Pipeline 矩陣
 
 | # | Pipeline | 觸發 | 檢查項目 | 部署目標 | 時間預算 | 人工審批 |
 |---|----------|------|----------|----------|----------|----------|
@@ -2038,7 +2422,7 @@ flowchart TB
 | ⑤ | `production-release` | push tag `v*` | 映像簽章驗證、manifest diff | `prod` namespace | < 20 min | **是（2 人）** |
 | ⑥ | `nightly-e2e` | 每日 02:00 排程 | 完整 GitFlow 回歸、多版本相容、負載測試 | Kind 臨時叢集 | < 90 min | 否 |
 
-### 14.3 Pipeline ①：feature-ci（快速回饋）
+### 15.3 Pipeline ①：feature-ci（快速回饋）
 
 `.github/workflows/01-feature-ci.yml`
 
@@ -2158,7 +2542,7 @@ jobs:
 
 ---
 
-### 14.4 Pipeline ②：develop-cd（持續整合 → dev 環境）
+### 15.4 Pipeline ②：develop-cd（持續整合 → dev 環境）
 
 `.github/workflows/02-develop-cd.yml`
 
@@ -2256,7 +2640,7 @@ jobs:
 
 ---
 
-### 14.5 Pipeline ③：release-cd（發版候選 → staging）
+### 15.5 Pipeline ③：release-cd（發版候選 → staging）
 
 `.github/workflows/03-release-cd.yml`
 
@@ -2390,7 +2774,7 @@ jobs:
 
 ---
 
-### 14.6 Pipeline ④：hotfix-cd（快速通道）
+### 15.6 Pipeline ④：hotfix-cd（快速通道）
 
 `.github/workflows/04-hotfix-cd.yml`
 
@@ -2496,7 +2880,7 @@ jobs:
 
 ---
 
-### 14.7 Pipeline ⑤：production-release（正式上線）
+### 15.7 Pipeline ⑤：production-release（正式上線）
 
 `.github/workflows/05-production-release.yml`
 
@@ -2650,7 +3034,7 @@ jobs:
 
 ---
 
-### 14.8 Pipeline ⑥：nightly-e2e（深度回歸）
+### 15.8 Pipeline ⑥：nightly-e2e（深度回歸）
 
 `.github/workflows/06-nightly-e2e.yml`
 
@@ -2744,7 +3128,7 @@ jobs:
 
 ---
 
-### 14.9 Pipeline 設計原則
+### 15.9 Pipeline 設計原則
 
 | 原則 | 說明 |
 |------|------|
@@ -2757,7 +3141,7 @@ jobs:
 | **臨時叢集** | PR 預覽與 E2E 用 Kind 隨開隨關，不維護常駐測試環境 |
 | **不可變映像** | 同一個 SHA 建出的映像，從 dev 一路用到 prod，不重新 build |
 
-### 14.10 分支保護與 pipeline 的對應
+### 15.10 分支保護與 pipeline 的對應
 
 | 分支 | 必過的 status checks | 審批人數 |
 |------|---------------------|----------|
@@ -2847,14 +3231,17 @@ kubectl config use-context kind-gitflow-demo
 kind delete cluster --name gitflow-demo
 ```
 
-預期輸出：
+實機輸出（Kind 0.32）：
 
 ```text
 NAME                         STATUS   ROLES           AGE   VERSION
-gitflow-demo-control-plane   Ready    control-plane   60s   v1.34.0
-gitflow-demo-worker          Ready    <none>          45s   v1.34.0
-gitflow-demo-worker2         Ready    <none>          45s   v1.34.0
+gitflow-demo-control-plane   Ready    control-plane   47s   v1.36.1
+gitflow-demo-worker          Ready    <none>          33s   v1.36.1
+gitflow-demo-worker2         Ready    <none>          34s   v1.36.1
 ```
+
+> Kubernetes 版本由 Kind 的版本決定（Kind 0.32 → k8s 1.36.1）。
+> 要指定版本請用 `kind create cluster --image kindest/node:v1.34.0`。
 
 ### A.4 安裝 Ingress Controller
 
@@ -2865,6 +3252,47 @@ kubectl wait --namespace ingress-nginx \
   --for=condition=ready pod \
   --selector=app.kubernetes.io/component=controller \
   --timeout=180s
+```
+
+#### 實測踩到的兩個坑（Kind + ingress-nginx）
+
+**坑 1：controller 被排到 worker 節點，Ingress 完全不通**
+
+`kind-cluster.yaml` 的 `extraPortMappings` 只開在 control-plane 上，但新版的
+ingress-nginx kind provider manifest **已經拿掉 `ingress-ready` 的 nodeSelector**，
+controller 可能被排到 worker，導致 host 的 8080 埠打不到任何東西。
+
+```bash
+# 確認它跑在哪個節點
+kubectl -n ingress-nginx get pod -o wide -l app.kubernetes.io/component=controller
+# NAME                            ...   NODE
+# ingress-nginx-controller-xxx    ...   gitflow-demo-worker      ← ✘ 不通
+
+# 釘回有 port mapping 的節點
+kubectl -n ingress-nginx patch deployment ingress-nginx-controller --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/nodeSelector/ingress-ready","value":"true"}]'
+
+kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller
+# NAME                            ...   NODE
+# ingress-nginx-controller-yyy    ...   gitflow-demo-control-plane   ← ✔ 通了
+```
+
+**坑 2：controller 還沒起來就 apply Ingress，被 admission webhook 拒絕**
+
+```text
+Error from server (InternalError): failed calling webhook "validate.nginx.ingress.kubernetes.io":
+dial tcp 10.96.46.42:443: connect: connection refused
+```
+
+controller 的映像要拉 ~110MB，第一次可能等 30 秒以上。
+`scripts/deploy.sh` 對此做了**優雅降級**：等不到 controller 就跳過 Ingress，改提示用
+`port-forward`，讓部署本身不會因為 Ingress 而失敗。
+
+驗證 Ingress 真的通了：
+
+```console
+$ curl -s -H "Host: dev.demo.localtest.me" http://localhost:8080/healthz
+ok
 ```
 
 ### A.5 建立對應 GitFlow 的三個環境
@@ -2973,160 +3401,89 @@ spec:
 
 ### A.7 一鍵部署腳本
 
-`scripts/deploy.sh`：
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
-SHA="$(git rev-parse --short HEAD 2>/dev/null || echo local)"
-CLUSTER="gitflow-demo"
-
-# ── GitFlow 分支 → K8s namespace 對應 ──────────────
-case "$BRANCH" in
-  main|master)  NS=prod    ; REPLICAS=3 ; HOST=demo.localtest.me        ;;
-  release/*)    NS=staging ; REPLICAS=2 ; HOST=stg.demo.localtest.me    ;;
-  develop)      NS=dev     ; REPLICAS=1 ; HOST=dev.demo.localtest.me    ;;
-  *)            echo "❌ 分支 '$BRANCH' 不對應任何環境（feature 分支只跑 CI，不部署）"; exit 1 ;;
-esac
-
-VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
-TAG="${VERSION}-${SHA}"
-IMAGE="demo-app:${TAG}"
-
-echo "▶ 分支 : $BRANCH"
-echo "▶ 環境 : $NS  (replicas=$REPLICAS)"
-echo "▶ 映像 : $IMAGE"
-
-# 1. 建置映像
-docker build \
-  --build-arg APP_VERSION="$VERSION" \
-  --build-arg GIT_BRANCH="$BRANCH" \
-  --build-arg GIT_SHA="$SHA" \
-  -t "$IMAGE" ./app
-
-# 2. 載入映像到 Kind 節點（Kind 不會自動從本機 docker 抓映像）
-kind load docker-image "$IMAGE" --name "$CLUSTER"
-
-# 3. 套用 manifest
-kubectl -n "$NS" apply -f k8s/base/deployment.yaml
-kubectl -n "$NS" apply -f k8s/base/ingress.yaml
-
-# 4. 覆寫映像、replica 數與 ingress host
-kubectl -n "$NS" set image deployment/demo-app web="$IMAGE"
-kubectl -n "$NS" scale deployment/demo-app --replicas="$REPLICAS"
-kubectl -n "$NS" patch ingress demo-app --type=json \
-  -p "[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"$HOST\"}]"
-
-# 5. 等待滾動更新完成
-kubectl -n "$NS" rollout status deployment/demo-app --timeout=120s
-
-echo "✅ 部署完成 → http://${HOST}:8080"
-```
+完整腳本見 [`scripts/deploy.sh`](scripts/deploy.sh)。核心是[前面 C4 Level 4](#level-4--code關鍵資料結構) 那張分支路由表，
+外加五個步驟：建置映像 → `kind load` 進節點 → 套用 manifest → 覆寫映像/replica/host → 等待滾動更新（失敗自動回滾）。
 
 ```bash
 chmod +x scripts/deploy.sh
 
-git switch develop      && ./scripts/deploy.sh   # → dev namespace
-git switch release/1.0.0 && ./scripts/deploy.sh  # → staging namespace
-git switch main         && ./scripts/deploy.sh   # → prod namespace
-
-curl -s http://dev.demo.localtest.me:8080 | grep -o '<b>[^<]*</b>'
+git switch develop       && ./scripts/deploy.sh    # → dev     (1 replica)
+git switch release/1.1.0 && ./scripts/deploy.sh    # → staging (2 replicas)
+git switch main          && ./scripts/deploy.sh    # → prod    (3 replicas)
 ```
+
+**實機執行結果**
+
+```console
+$ ./scripts/deploy.sh develop
+────────────────────────────────────────────
+  分支    : develop
+  環境    : dev  (replicas=1)
+  映像    : demo-app:1.0.0-dev.d5059e4
+  網址    : http://dev.demo.localtest.me:8080
+────────────────────────────────────────────
+▶ [1/5] 建置映像
+▶ [2/5] 載入映像到 Kind 節點
+▶ [3/5] 確保 namespace 存在
+▶ [4/5] 套用 manifest
+▶ [5/5] 等待滾動更新
+deployment "demo-app" successfully rolled out
+✅ 部署完成
+   http://dev.demo.localtest.me:8080
+```
+
+三個分支各部署一次後，三個環境同時線上：
+
+```console
+$ kubectl get deploy -A -l app=demo-app \
+    -o custom-columns='NAMESPACE:.metadata.namespace,READY:.status.readyReplicas,\
+IMAGE:.spec.template.spec.containers[0].image,CHANGE-CAUSE:.metadata.annotations.kubernetes\.io/change-cause'
+
+NAMESPACE   READY   IMAGE                        CHANGE-CAUSE
+dev         1       demo-app:1.0.0-dev.d5059e4   develop@d5059e4
+staging     2       demo-app:1.1.0-rc.ddf9df0    release/1.1.0@ddf9df0
+prod        3       demo-app:1.1.0.77f1e19       main@77f1e19
+```
+
+> `CHANGE-CAUSE` 欄位是靠 `kubectl annotate ... kubernetes.io/change-cause` 寫入的。
+> 上線出事時，`kubectl rollout history` 一眼就能看出「這一版是從哪個分支的哪個 commit 來的」——
+> 這是把 GitFlow 接上 K8s 時最值得做的一件小事。
+
+**三個環境的隔離驗證**
+
+```console
+$ for h in dev.demo stg.demo demo; do curl -s -H "Host: ${h}.localtest.me" http://localhost:8080/; done
+Version: 1.0.0-dev.d5059e4  Branch: develop        Environment: dev
+Version: 1.1.0-rc.ddf9df0   Branch: release/1.1.0  Environment: staging
+Version: 1.1.0.77f1e19      Branch: main           Environment: prod
+```
+
+映像把「自己來自哪個分支」烙進 `index.html`，所以打開網頁就能確認部署對不對 ——
+這是驗證分支策略最直觀的方式。
 
 ### A.8 GitHub Actions：GitFlow → K8s 自動部署
 
-`.github/workflows/gitflow-cicd.yml`：
+完整的 6 條 pipeline 已獨立成[第 15 章](#15-多-pipeline-設計)，
+可執行的檔案在 [`.github/workflows/`](.github/workflows/)。與本附錄相關的重點：
+
+| Pipeline | 與 Kind 的關係 |
+|----------|---------------|
+| ① `feature-ci` | 用 `helm/kind-action` 開**臨時叢集**做 PR 預覽，job 結束即銷毀 |
+| ③ `release-cd` | 在臨時叢集跑完整 E2E，再部署到常駐的 staging |
+| ⑥ `nightly-e2e` | 用 matrix 在 k8s 1.34 / 1.35 / 1.36 上各跑一次，驗證相容性與回滾機制 |
+
+CI 中建立 Kind 叢集只要三行：
 
 ```yaml
-name: GitFlow CI/CD
-
-on:
-  push:
-    branches: [main, develop, 'release/**', 'hotfix/**']
-    tags: ['v*']
-  pull_request:
-    branches: [develop, main]
-
-jobs:
-  # ── 所有分支都要跑的檢查 ──────────────────────
-  ci:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-
-      - name: 檢查分支命名是否符合 GitFlow
-        if: github.event_name == 'push'
-        run: |
-          BRANCH="${GITHUB_REF#refs/heads/}"
-          if [[ ! "$BRANCH" =~ ^(main|develop|feature/.+|release/.+|hotfix/.+)$ ]]; then
-            echo "❌ 分支名稱 '$BRANCH' 不符合 GitFlow 規範"; exit 1
-          fi
-
-      - name: Lint / Test
-        run: |
-          echo "在此執行 npm test / go test / pytest ..."
-
-      - name: Build image
-        run: |
-          docker build \
-            --build-arg APP_VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)" \
-            --build-arg GIT_BRANCH="${GITHUB_REF_NAME}" \
-            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
-            -t demo-app:${GITHUB_SHA::7} ./app
-
-  # ── 在 Kind 上做整合測試（PR 與 push 都跑） ──────
-  e2e-on-kind:
-    needs: ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 建立 Kind 叢集
-        uses: helm/kind-action@v1
+      - uses: helm/kind-action@v1
         with:
           cluster_name: ci
           config: kind-cluster.yaml
-
-      - name: 部署並驗證
-        run: |
-          docker build -t demo-app:ci ./app
-          kind load docker-image demo-app:ci --name ci
-          kubectl create namespace test
-          kubectl -n test apply -f k8s/base/deployment.yaml
-          kubectl -n test set image deployment/demo-app web=demo-app:ci
-          kubectl -n test rollout status deployment/demo-app --timeout=180s
-          kubectl -n test run curl --image=curlimages/curl:latest --rm -i --restart=Never \
-            -- curl -sf http://demo-app.test.svc.cluster.local
-
-  # ── 分支 → 環境的部署 ────────────────────────
-  deploy:
-    needs: [ci, e2e-on-kind]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'production' || startsWith(github.ref_name, 'release/') && 'staging' || 'development' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 決定目標 namespace
-        id: env
-        run: |
-          case "${GITHUB_REF_NAME}" in
-            main)       echo "ns=prod"    >> $GITHUB_OUTPUT; echo "replicas=3" >> $GITHUB_OUTPUT ;;
-            release/*)  echo "ns=staging" >> $GITHUB_OUTPUT; echo "replicas=2" >> $GITHUB_OUTPUT ;;
-            hotfix/*)   echo "ns=staging" >> $GITHUB_OUTPUT; echo "replicas=2" >> $GITHUB_OUTPUT ;;
-            develop)    echo "ns=dev"     >> $GITHUB_OUTPUT; echo "replicas=1" >> $GITHUB_OUTPUT ;;
-          esac
-
-      - name: 部署到 ${{ steps.env.outputs.ns }}
-        run: |
-          echo "kubectl -n ${{ steps.env.outputs.ns }} set image deployment/demo-app web=demo-app:${GITHUB_SHA::7}"
-          echo "kubectl -n ${{ steps.env.outputs.ns }} rollout status deployment/demo-app"
-        # 實務上此處需先用 azure/k8s-set-context 或 aws-actions/configure-aws-credentials
-        # 設定好 kubeconfig，再執行真正的 kubectl 指令
 ```
+
+> **不要維護常駐的測試叢集。** PR 預覽與 E2E 用 Kind 隨開隨關，
+> 每次都是乾淨環境，成本只有 runner 的幾分鐘，也不會有「測試環境被別人佔用」的問題。
+
 
 ### A.9 K8s 常用除錯指令
 
@@ -3152,13 +3509,16 @@ kubectl top pods -n dev                             # 資源用量（需 metrics
 
 | 問題 | 原因 | 解法 |
 |------|------|------|
-| `failed to connect to docker API` | Docker daemon 沒啟動 | 啟動 Docker Desktop 或 `colima start` |
-| Pod 卡在 `ErrImagePull` | Kind 節點看不到本機 docker 映像 | `kind load docker-image <image> --name <cluster>` |
+| `failed to connect to the docker API at unix:///var/run/docker.sock` | 沒有執行中的容器 daemon | 啟動 Docker Desktop，或 `colima start --cpu 4 --memory 8 --disk 60` |
+| Pod 卡在 `ErrImagePull` | **Kind 節點看不到本機 docker 映像** | `kind load docker-image <image> --name <cluster>` |
 | `ImagePullBackOff` 但已 load | `imagePullPolicy: Always` 逼它去 registry 抓 | 改成 `IfNotPresent` |
-| Ingress 連不上 | 沒做 `extraPortMappings` 或 controller 未就緒 | 檢查 kind config 與 `kubectl get pods -n ingress-nginx` |
-| 叢集建立超時 | 記憶體不足 | Docker Desktop 調高至 ≥ 8GB |
+| **Ingress 回 connection refused** | controller 被排到沒有 port mapping 的 worker | 見 [A.4 坑 1](#實測踩到的兩個坑kind--ingress-nginx)：patch nodeSelector `ingress-ready=true` |
+| **apply Ingress 被 webhook 拒絕** | controller 尚未就緒（映像要拉 ~110MB） | `kubectl wait -n ingress-nginx --for=condition=ready pod -l app.kubernetes.io/component=controller` |
+| 叢集建立超時 | 記憶體不足 | Docker Desktop / Colima 調高至 ≥ 8GB |
 | Pod 一直 `Pending` | 資源不足或無可用節點 | `kubectl describe pod` 看 Events |
+| k8s 版本跟預期不同 | 版本由 Kind 版本決定 | `kind create cluster --image kindest/node:v1.34.0` |
 | 清理磁碟 | Kind 映像佔空間 | `kind delete cluster --all && docker system prune -af` |
+| **Colima：hostPort 打不通** | VM 的 port forwarding 未生效 | `docker port <control-plane>` 確認映射；或改用 `kubectl port-forward` |
 
 ---
 
@@ -3334,6 +3694,325 @@ kubectl -n <ns> describe pod <pod>
 kubectl -n <ns> port-forward svc/<svc> 8000:80
 ```
 
+### 本專案的演練工具
+
+```bash
+./drills/practice.sh list          # 12 題互動演練（你動手）
+./drills/practice.sh start <n>     # 佈題
+./drills/practice.sh check <n>     # 驗收
+./drills/practice.sh hint  <n>     # 提示
+./drills/practice.sh solve <n>     # 解答
+
+./scenarios/simulate.sh list       # 26 個情境（自動演示）
+./scenarios/simulate.sh 10         # 跑單一情境
+./scenarios/simulate.sh all        # 全部跑一遍
+
+./scripts/deploy.sh <branch>       # 依分支部署到對應 namespace
+```
+
+---
+
+## 附錄 D：其他 CI 平台範本
+
+[第 15 章](#15-多-pipeline-設計)以 GitHub Actions 示範，同一套「分支 → pipeline → 環境」的
+設計原則在其他平台一樣適用。以下是等價實作。
+
+### D.1 GitLab CI
+
+`.gitlab-ci.yml` —— GitLab 用單一檔案 + `rules` 做分支分流：
+
+```yaml
+stages: [guard, test, build, deploy, release]
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE/demo-app
+
+# ── 可重用的規則片段 ─────────────────────────────
+.on_feature: &on_feature
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^feature\//'
+.on_develop: &on_develop
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+.on_release: &on_release
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^release\//'
+.on_hotfix: &on_hotfix
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^hotfix\//'
+.on_tag: &on_tag
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+
+# ── ① 分支規範（所有分支都跑）────────────────────
+branch-guard:
+  stage: guard
+  script:
+    - |
+      case "$CI_COMMIT_BRANCH" in
+        main|develop|feature/*|release/*|hotfix/*|support/*|"") ;;
+        *) echo "分支 '$CI_COMMIT_BRANCH' 不符 GitFlow 規範"; exit 1 ;;
+      esac
+
+# ── ② feature：只驗證，不部署 ──────────────────
+feature:test:
+  <<: *on_feature
+  stage: test
+  script:
+    - npm run lint && npm test
+
+# ── ③ develop → dev ────────────────────────────
+develop:deploy:
+  <<: *on_develop
+  stage: deploy
+  environment:
+    name: development
+    url: https://dev.demo.example.com
+  script:
+    - docker build -t $IMAGE:$CI_COMMIT_SHORT_SHA ./app
+    - docker push $IMAGE:$CI_COMMIT_SHORT_SHA
+    - kubectl -n dev set image deployment/demo-app web=$IMAGE:$CI_COMMIT_SHORT_SHA
+    - kubectl -n dev rollout status deployment/demo-app --timeout=180s
+
+# ── ④ release → staging（含完整檢查）────────────
+release:validate:
+  <<: *on_release
+  stage: guard
+  script:
+    - BR_VER="${CI_COMMIT_BRANCH#release/}"
+    - '[ "$BR_VER" = "$(cat VERSION)" ] || { echo "分支名與 VERSION 不一致"; exit 1; }'
+    - git fetch --tags
+    - '! git rev-parse "v$BR_VER" >/dev/null 2>&1 || { echo "tag 已存在"; exit 1; }'
+
+release:deploy:
+  <<: *on_release
+  stage: deploy
+  needs: [release:validate]
+  environment: { name: staging }
+  script:
+    - kubectl -n staging set image deployment/demo-app web=$IMAGE:$CI_COMMIT_SHORT_SHA
+    - kubectl -n staging rollout status deployment/demo-app --timeout=300s
+
+# ── ⑤ hotfix：快速通道 ─────────────────────────
+hotfix:deploy:
+  <<: *on_hotfix
+  stage: deploy
+  environment: { name: staging }
+  script:
+    - git fetch origin main
+    - '[ "$(git merge-base origin/main HEAD)" = "$(git rev-parse origin/main)" ] || { echo "hotfix 必須從 main 開"; exit 1; }'
+    - kubectl -n staging set image deployment/demo-app web=$IMAGE:$CI_COMMIT_SHORT_SHA
+
+# ── ⑥ tag → production（需人工按鈕）─────────────
+prod:deploy:
+  <<: *on_tag
+  stage: release
+  when: manual                     # ★ GitLab 的人工閘門
+  allow_failure: false
+  environment:
+    name: production
+    url: https://demo.example.com
+  script:
+    - git merge-base --is-ancestor $CI_COMMIT_SHA origin/main || { echo "tag 不在 main 上"; exit 1; }
+    - kubectl -n prod set image deployment/demo-app web=$IMAGE:${CI_COMMIT_TAG#v}
+    - kubectl -n prod rollout status deployment/demo-app --timeout=600s
+  after_script:
+    - '[ "$CI_JOB_STATUS" = "failed" ] && kubectl -n prod rollout undo deployment/demo-app || true'
+```
+
+| GitHub Actions | GitLab CI |
+|----------------|-----------|
+| 多個 workflow 檔案 | 單一 `.gitlab-ci.yml` + `rules` |
+| `environment` + required reviewers | `when: manual` + Protected environments |
+| `concurrency` | `resource_group` |
+| `needs:` | `needs:` / `stage` |
+| `if: failure()` | `after_script` 檢查 `$CI_JOB_STATUS` |
+
+### D.2 Jenkins（Multibranch Pipeline）
+
+`Jenkinsfile` —— Jenkins 用單一檔案 + `when` 條件：
+
+```groovy
+pipeline {
+  agent any
+
+  environment {
+    IMAGE   = "registry.example.com/demo-app"
+    SHA     = "${env.GIT_COMMIT.take(7)}"
+    VERSION = sh(script: 'cat VERSION 2>/dev/null || echo 0.0.0', returnStdout: true).trim()
+  }
+
+  stages {
+    stage('分支規範檢查') {
+      steps {
+        script {
+          if (!(env.BRANCH_NAME ==~ /^(main|develop|feature\/.+|release\/.+|hotfix\/.+|support\/.+)$/)) {
+            error "分支 '${env.BRANCH_NAME}' 不符 GitFlow 規範"
+          }
+        }
+      }
+    }
+
+    stage('Lint & Unit Test') {
+      steps { sh 'npm run lint && npm test' }
+    }
+
+    stage('hotfix 前置條件') {
+      when { branch pattern: 'hotfix/.*', comparator: 'REGEXP' }
+      steps {
+        sh '''
+          git fetch origin main
+          [ "$(git merge-base origin/main HEAD)" = "$(git rev-parse origin/main)" ] \
+            || { echo "hotfix 必須從最新的 main 開出"; exit 1; }
+        '''
+      }
+    }
+
+    stage('release 版本號檢核') {
+      when { branch pattern: 'release/.*', comparator: 'REGEXP' }
+      steps {
+        sh '''
+          BR_VER="${BRANCH_NAME#release/}"
+          [ "$BR_VER" = "$(cat VERSION)" ] || { echo "分支名與 VERSION 不一致"; exit 1; }
+        '''
+      }
+    }
+
+    stage('Build & Push') {
+      steps {
+        sh """
+          docker build --build-arg APP_VERSION=${VERSION} \
+                       --build-arg GIT_BRANCH=${BRANCH_NAME} \
+                       --build-arg GIT_SHA=${SHA} \
+                       -t ${IMAGE}:${SHA} ./app
+          docker push ${IMAGE}:${SHA}
+        """
+      }
+    }
+
+    stage('Deploy') {
+      steps {
+        script {
+          def target = [
+            'develop': [ns: 'dev',     replicas: 1],
+          ][env.BRANCH_NAME]
+          if (env.BRANCH_NAME.startsWith('release/') ||
+              env.BRANCH_NAME.startsWith('hotfix/'))  target = [ns: 'staging', replicas: 2]
+          if (env.BRANCH_NAME == 'main')              target = [ns: 'prod',    replicas: 3]
+
+          if (target == null) {
+            echo "分支 ${env.BRANCH_NAME} 不部署（只跑 CI）"
+            return
+          }
+          if (target.ns == 'prod') {
+            timeout(time: 30, unit: 'MINUTES') {
+              input message: "確認部署 ${VERSION} 到 Production？", submitter: 'release-managers'
+            }
+          }
+          sh """
+            kubectl -n ${target.ns} set image deployment/demo-app web=${IMAGE}:${SHA}
+            kubectl -n ${target.ns} scale deployment/demo-app --replicas=${target.replicas}
+            kubectl -n ${target.ns} rollout status deployment/demo-app --timeout=300s
+          """
+        }
+      }
+      post {
+        failure {
+          script {
+            def ns = env.BRANCH_NAME == 'main' ? 'prod' :
+                     env.BRANCH_NAME == 'develop' ? 'dev' : 'staging'
+            sh "kubectl -n ${ns} rollout undo deployment/demo-app || true"
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always { cleanWs() }
+  }
+}
+```
+
+> Jenkins 的 `input` step 就是人工審批閘門，`submitter` 可限定只有特定群組能按。
+
+### D.3 Argo CD（GitOps 版本）
+
+GitOps 把「部署什麼」也放進 Git，CI 只負責**更新 manifest 中的映像 tag**，
+由 Argo CD 監看倉庫並同步到叢集。
+
+```mermaid
+flowchart LR
+    CI["CI Pipeline<br/>build + push image"]
+    CFG["📁 config repo<br/>envs/dev · staging · prod"]
+    ACD["🐙 Argo CD<br/>持續比對期望狀態"]
+    K["☸️ Kubernetes"]
+
+    CI -->|"① 更新 image tag<br/>並 commit"| CFG
+    ACD -->|"② 偵測到差異"| CFG
+    ACD -->|"③ 同步"| K
+    K -.->|"④ 回報實際狀態"| ACD
+```
+
+`argocd/dev.yaml`：
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/<org>/demo-app-config.git
+    targetRevision: develop          # ★ 追蹤 develop 分支
+    path: envs/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }   # dev 全自動
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-prod
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://github.com/<org>/demo-app-config.git
+    targetRevision: main             # ★ 追蹤 main 分支
+    path: envs/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy: {}                     # ★ prod 不自動同步，人工按 Sync
+```
+
+CI 端只需要一步：
+
+```bash
+# 在 config repo 上更新映像 tag 並 commit
+yq -i ".image.tag = \"${VERSION}-${SHA}\"" envs/dev/values.yaml
+git commit -am "chore(deploy): dev → ${VERSION}-${SHA}"
+git push
+# 剩下的交給 Argo CD
+```
+
+| | 傳統 Push 式 CD | GitOps (Argo CD) |
+|---|---|---|
+| 誰動叢集 | CI 拿著 kubeconfig 推 | 叢集內的 Argo CD 自己拉 |
+| 憑證 | CI 需要叢集寫入權限 | CI 只需 config repo 的推送權 |
+| 稽核 | 看 CI log | **看 Git 歷史**（每次部署都是一個 commit） |
+| 回滾 | `kubectl rollout undo` | `git revert` config repo |
+| 漂移偵測 | 無 | `selfHeal` 自動修正手動改動 |
+| GitFlow 對應 | 分支觸發 pipeline | **分支對應 Application 的 targetRevision** |
+
+> GitOps 與 GitFlow 搭配得很自然：`develop`/`release/*`/`main` 分別對應
+> dev/staging/prod 三個 Argo CD Application 的 `targetRevision`，
+> 分支模型直接變成部署模型。
+
 ---
 
 ## 延伸閱讀
@@ -3346,6 +4025,9 @@ kubectl -n <ns> port-forward svc/<svc> 8000:80
 - [Kind 官方文件](https://kind.sigs.k8s.io/)
 - [Learn Git Branching（互動式練習）](https://learngitbranching.js.org/?locale=zh_TW)
 - [Oh Shit, Git!?!](https://ohshitgit.com/)
+- [C4 Model 官方網站](https://c4model.com/)
+- [Argo CD 官方文件](https://argo-cd.readthedocs.io/)
+- [ingress-nginx for Kind](https://kind.sigs.k8s.io/docs/user/ingress/)
 
 ---
 
