@@ -72,96 +72,102 @@ git-gitflow-tutorial/
 ├── kind-cluster.yaml              # Kind 叢集定義（1 control-plane + 2 worker）
 ├── scripts/
 │   └── deploy.sh                  # 分支 → namespace 部署腳本
-└── .github/workflows/             # ★ 6 條獨立 pipeline
-    ├── 01-feature-ci.yml          #   feature/**        → 臨時 Kind 叢集
-    ├── 02-develop-cd.yml          #   develop           → dev
-    ├── 03-release-cd.yml          #   release/**        → staging
-    ├── 04-hotfix-cd.yml           #   hotfix/**         → staging（快速通道）
-    ├── 05-production-release.yml  #   tag v*            → prod（需審批）
-    └── 06-nightly-e2e.yml         #   排程              → 深度回歸
+└── ci-examples/
+    └── github-actions/            # ★ 6 條獨立 pipeline（範例，未啟用）
+        ├── 01-feature-ci.yml      #   feature/**        → 臨時 Kind 叢集
+        ├── 02-develop-cd.yml      #   develop           → dev
+        ├── 03-release-cd.yml      #   release/**        → staging
+        ├── 04-hotfix-cd.yml       #   hotfix/**         → staging（快速通道）
+        ├── 05-production-release.yml  # tag v*          → prod（需審批）
+        └── 06-nightly-e2e.yml     #   排程              → 深度回歸
 ```
+
+> **為什麼 pipeline 放在 `ci-examples/` 而不是 `.github/workflows/`？**
+> 放在 `.github/workflows/` 會被 GitHub **自動觸發執行**。本專案是教材，
+> pipeline 是拿來讀與改的範例，因此刻意放在一般目錄下，不會消耗你的 Actions 額度、
+> 也不會誤觸任何環境。
+>
+> 想真的啟用時：
+> ```bash
+> mkdir -p .github && git mv ci-examples/github-actions .github/workflows
+> ```
+> 啟用前請先在 repo 設定好 `KUBECONFIG_DEV` 等 secret 與 environment 審批規則。
 
 ---
 
 ## 演練平台架構（C4 Model）
 
-用 [C4 Model](https://c4model.com/) 的四個層級說明這套演練平台本身是怎麼組成的。
-四張圖由外而內：**誰在用 → 有哪些可執行單元 → 單元內部怎麼分工 → 關鍵資料結構**。
+用 [C4 Model](https://c4model.com/) 說明這套演練平台本身是怎麼組成的。
+由外而內五張圖：**誰在用 → 有哪些可執行單元 → 單元內部怎麼分工 → 關鍵資料結構 → 實際跑在哪裡**。
+
+> 以下使用 Mermaid 原生的 C4 語法（`C4Context` / `C4Container` / `C4Component` / `C4Deployment`），
+> 每一張都已實際渲染驗證過。
 
 ### Level 1 — System Context（系統情境）
 
 誰會用這套平台、它跟外部世界的邊界在哪。
 
 ```mermaid
-flowchart TB
-    subgraph people["使用者"]
-        L["👤 <b>學習者</b><br/>Git 新手 / 想導入 GitFlow 的工程師"]
-        I["👤 <b>講師 · 團隊 Lead</b><br/>帶教育訓練、制定分支規範"]
-    end
-
-    P["<b>GitFlow 演練平台</b><br/>[Software System]<br/><br/>提供手冊、可驗收的動手練習、<br/>情境模擬與可實際部署的 CI/CD 範例"]
-
-    G["<b>GitHub</b><br/>[External System]<br/>遠端倉庫 · PR · Actions"]
-    D["<b>容器執行環境</b><br/>[External System]<br/>Docker Desktop / Colima"]
-    R["<b>Container Registry</b><br/>[External System]<br/>ghcr.io"]
-
-    L -->|"跑練習、讀手冊、<br/>下 git 指令"| P
-    I -->|"客製情境、<br/>制定 pipeline 規範"| P
-    P -->|"push / PR / 觸發 workflow"| G
-    P -->|"建立 Kind 叢集、<br/>建置映像"| D
-    G -->|"推送與拉取映像"| R
-
-    classDef person fill:#08427b,stroke:#052e56,color:#fff
-    classDef system fill:#1168bd,stroke:#0b4884,color:#fff
-    classDef ext fill:#999,stroke:#6b6b6b,color:#fff
-    class L,I person
-    class P system
-    class G,D,R ext
+C4Context
+title Level 1 - System Context
+Person(learner, "學習者", "Git 新手、想導入 GitFlow 的工程師")
+Person(lead, "講師 / 團隊 Lead", "帶教育訓練、制定分支規範")
+System(platform, "GitFlow 演練平台", "教學手冊、可驗收的動手練習、情境模擬、可實際部署的 CI/CD 範例")
+System_Ext(github, "GitHub", "遠端倉庫、Pull Request、Actions")
+System_Ext(runtime, "容器執行環境", "Docker Desktop / Colima")
+System_Ext(registry, "Container Registry", "ghcr.io")
+Rel(learner, platform, "讀手冊、跑練習、下 git 指令")
+Rel(lead, platform, "客製情境、制定 pipeline 規範")
+Rel(platform, github, "push / PR / 觸發 workflow")
+Rel(platform, runtime, "建立 Kind 叢集、建置映像")
+Rel(github, registry, "推送與拉取映像")
 ```
+
+| 元素 | 類型 | 說明 |
+|------|------|------|
+| 學習者 | Person | 跑 12 題演練、讀手冊、在沙箱下 git 指令 |
+| 講師 / 團隊 Lead | Person | 客製情境、把分支規範寫進 pipeline |
+| GitFlow 演練平台 | System | 本專案：手冊 + 演練工具 + 部署範例 |
+| GitHub | External | 遠端倉庫、Pull Request、Actions |
+| 容器執行環境 | External | Kind 需要它才能把節點跑成容器 |
+| Container Registry | External | CI 推送映像的目的地（ghcr.io） |
 
 ### Level 2 — Container（可執行單元）
 
 平台內部有哪些「可以獨立跑起來」的單元，彼此怎麼互動。
 
 ```mermaid
-flowchart TB
-    L["👤 學習者"]
-
-    subgraph PLATFORM["GitFlow 演練平台"]
-        direction TB
-        RM["📘 <b>README.md</b><br/>[Markdown]<br/>教學手冊 · 指令對照 · Mermaid 圖解"]
-        PR["🎯 <b>practice.sh</b><br/>[Bash]<br/>12 題互動演練場<br/>佈題 → 你動手 → 自動驗收"]
-        SM["🎬 <b>simulate.sh</b><br/>[Bash]<br/>26 個情境模擬器<br/>自動演示 + 39 項斷言"]
-        DP["🚀 <b>deploy.sh</b><br/>[Bash]<br/>分支 → namespace 部署器"]
-        WF["⚙️ <b>.github/workflows/</b><br/>[YAML × 6]<br/>分支各自對應的 CI/CD 流水線"]
-        MF["📦 <b>k8s/base/ + Dockerfile</b><br/>[YAML / Dockerfile]<br/>部署宣告與示範應用"]
-    end
-
-    SB["🗂 <b>沙箱 Repo</b><br/>[Git repo]<br/>/tmp/gitflow-drills/<br/>/tmp/gitflow-sandbox/"]
-    KC["☸️ <b>Kind 叢集</b><br/>[Kubernetes]<br/>ns: dev · staging · prod"]
-
-    L -->|"閱讀"| RM
-    L -->|"start / check / hint"| PR
-    L -->|"執行情境"| SM
-    L -->|"手動部署"| DP
-
-    PR -->|"建立並驗證狀態"| SB
-    SM -->|"建立並驗證狀態"| SB
-    DP -->|"build · kind load · kubectl apply"| KC
-    DP -->|"讀取"| MF
-    WF -->|"CI 中臨時建立叢集"| KC
-    WF -->|"讀取"| MF
-    RM -.->|"引用"| PR
-    RM -.->|"引用"| SM
-    RM -.->|"引用"| DP
-
-    classDef person fill:#08427b,stroke:#052e56,color:#fff
-    classDef container fill:#438dd5,stroke:#2e6295,color:#fff
-    classDef store fill:#438dd5,stroke:#2e6295,color:#fff,stroke-dasharray: 5 3
-    class L person
-    class RM,PR,SM,DP,WF,MF container
-    class SB,KC store
+C4Container
+title Level 2 - Container
+Person(learner, "學習者", "Git 新手")
+Container_Boundary(platform, "GitFlow 演練平台") {
+  Container(readme, "README.md", "Markdown", "教學手冊、指令對照、圖解")
+  Container(practice, "practice.sh", "Bash", "12 題互動演練：佈題、驗收、提示、解答")
+  Container(simulate, "simulate.sh", "Bash", "26 個情境模擬，含 39 項自動斷言")
+  Container(deploy, "deploy.sh", "Bash", "分支感知的部署器")
+  Container(pipelines, "6 條 CI/CD Pipeline", "YAML", "分支各自對應的流水線")
+  Container(manifests, "k8s/base + Dockerfile", "YAML / Dockerfile", "部署宣告與示範應用")
+}
+ContainerDb(sandbox, "沙箱 Repo", "Git", "/tmp/gitflow-drills、/tmp/gitflow-sandbox")
+System_Ext(kind, "Kind 叢集", "Kubernetes：dev / staging / prod")
+Rel(learner, readme, "閱讀")
+Rel(learner, practice, "start / check / hint")
+Rel(learner, simulate, "執行情境")
+Rel(learner, deploy, "手動部署")
+Rel(practice, sandbox, "建立狀態並驗收")
+Rel(simulate, sandbox, "建立狀態並驗證")
+Rel(deploy, manifests, "讀取")
+Rel(deploy, kind, "build、kind load、kubectl apply")
+Rel(pipelines, kind, "CI 中建立臨時叢集")
 ```
+
+三支腳本的分工是刻意切開的：
+
+| 單元 | 你做什麼 | 它做什麼 | 需要 Docker？ |
+|------|----------|----------|---------------|
+| `practice.sh` | **你自己下 git 指令** | 佈題、逐項驗收、給診斷式回饋 | 否 |
+| `simulate.sh` | 看 | 自動跑完整情境並自我驗證 | 否 |
+| `deploy.sh` | 指定分支 | 建置映像、載入叢集、滾動更新 | 是 |
 
 ### Level 3 — Component（元件分解）
 
@@ -170,31 +176,32 @@ flowchart TB
 **`practice.sh` — 演練引擎**
 
 ```mermaid
-flowchart LR
-    CLI["<b>CLI 派工器</b><br/>main() / case<br/>list · start · check<br/>hint · solve · reset · clean"]
-
-    subgraph ENGINE["每一題的四個函式"]
-        S["<b>setup_N()</b><br/>佈置初始狀態<br/>刻意製造衝突 / 災難現場"]
-        T["<b>task_N()</b><br/>任務說明 + 💡建議<br/>不給答案，給思路"]
-        C["<b>check_N()</b><br/>逐項斷言 + 🎓學習重點<br/>診斷式錯誤訊息"]
-        H["<b>hint_N() / solve_N()</b><br/>提示與完整解答"]
-    end
-
-    HELP["<b>共用工具</b><br/>init_repo · qc<br/>pass · fail · box"]
-    REPO["🗂 /tmp/gitflow-drills/dN"]
-
-    CLI --> S & T & C & H
-    S --> HELP
-    C --> HELP
-    S -->|"寫入"| REPO
-    C -->|"讀取 git 狀態"| REPO
-    H -->|"寫入"| REPO
-
-    classDef comp fill:#85bbf0,stroke:#5d82a8,color:#000
-    classDef store fill:#438dd5,stroke:#2e6295,color:#fff,stroke-dasharray: 5 3
-    class CLI,S,T,C,H,HELP comp
-    class REPO store
+C4Component
+title Level 3 - Component (practice.sh)
+Person(learner, "學習者")
+Container_Boundary(practice, "practice.sh") {
+  Component(cli, "CLI 派工器", "case / main()", "list、start、check、hint、solve、reset、clean")
+  Component(setup, "setup_N()", "function", "佈置初始狀態，刻意製造衝突與災難現場")
+  Component(task, "task_N()", "function", "任務說明與建議，給思路不給答案")
+  Component(check, "check_N()", "function", "逐項斷言與學習重點，診斷式錯誤訊息")
+  Component(solve, "hint_N() / solve_N()", "function", "提示與完整解答")
+  Component(util, "共用工具", "function", "init_repo、qc、pass、fail")
+}
+ContainerDb(repo, "練習用 Repo", "Git", "/tmp/gitflow-drills/dN")
+Rel(learner, cli, "下指令")
+Rel(cli, setup, "佈題")
+Rel(cli, task, "顯示任務")
+Rel(cli, check, "驗收")
+Rel(cli, solve, "提示或解答")
+Rel(setup, repo, "建立初始狀態")
+Rel(check, repo, "讀取 git 狀態")
+Rel(solve, repo, "執行解答")
+Rel(setup, util, "使用")
+Rel(check, util, "使用")
 ```
+
+> 每一題就是 `setup_N` / `task_N` / `check_N` / `hint_N` / `solve_N` 五個函式。
+> 要新增第 13 題，照著這個介面寫五個函式、在 `TITLES` 陣列加一行即可，不必動派工器。
 
 **`deploy.sh` — 分支感知部署器**
 
@@ -240,6 +247,48 @@ esac
 | `hotfix/*` | `staging` | 2 | `1.0.1-hf.a3c91b2` | ④ hotfix-cd |
 | `develop` | `dev` | 1 | `1.0.0-dev.d5059e4` | ② develop-cd |
 | `feature/*` | （臨時叢集） | 1 | `pr-<n>` | ① feature-ci |
+
+### Level 5 — Deployment（部署視圖）
+
+前面四張圖講「軟體怎麼組成」，這張講「實際跑在哪裡」——
+GitFlow 的三種分支如何落到同一座 Kind 叢集的三個 namespace。
+
+```mermaid
+C4Deployment
+title Level 5 - Deployment (本機 Kind 叢集)
+Deployment_Node(laptop, "開發者筆電", "macOS") {
+  Deployment_Node(runtime, "容器執行環境", "Docker Desktop / Colima") {
+    Deployment_Node(cp, "gitflow-demo-control-plane", "Kind Node：port 8080 to 80") {
+      Container(ingress, "ingress-nginx controller", "nginx", "nodeSelector：ingress-ready=true")
+      Deployment_Node(nsdev, "namespace: dev", "對應 develop 分支") {
+        Container(appdev, "demo-app", "nginx", "1 replica")
+      }
+    }
+    Deployment_Node(w1, "gitflow-demo-worker", "Kind Node") {
+      Deployment_Node(nsstg, "namespace: staging", "對應 release/* 與 hotfix/*") {
+        Container(appstg, "demo-app", "nginx", "2 replicas")
+      }
+    }
+    Deployment_Node(w2, "gitflow-demo-worker2", "Kind Node") {
+      Deployment_Node(nsprod, "namespace: prod", "對應 main 與 tag v*") {
+        Container(appprod, "demo-app", "nginx", "3 replicas")
+      }
+    }
+  }
+}
+Rel(ingress, appdev, "dev.demo.localtest.me")
+Rel(ingress, appstg, "stg.demo.localtest.me")
+Rel(ingress, appprod, "demo.localtest.me")
+```
+
+幾個實測得到的重點：
+
+- **Ingress controller 必須跑在 control-plane 上**。只有該節點在 `kind-cluster.yaml` 裡做了
+  `extraPortMappings`（host 8080 → node 80），被排到 worker 就完全不通。
+  新版 ingress-nginx 的 kind manifest 已拿掉 `ingress-ready` 的 nodeSelector，需自行補上，
+  詳見[附錄 A.4](#實測踩到的兩個坑kind--ingress-nginx)。
+- **三個環境共用一座叢集**，靠 namespace 隔離、靠 host 分流。正式環境請讓 prod 使用獨立叢集。
+- **Pod 實際落在哪個 worker 由排程器決定**，圖上的擺放只是示意；namespace 才是真正的隔離邊界。
 
 ### 動態視圖：一次完整發版
 
@@ -2372,6 +2421,9 @@ $ ./scenarios/simulate.sh 10
 GitFlow 的每種分支有不同的**風險等級**與**目的**，因此不該共用同一條 pipeline。
 本章把 CI/CD 拆成 **6 條獨立流水線**，各自有不同的觸發條件、檢查強度與審批要求。
 
+> 檔案放在 [`ci-examples/github-actions/`](ci-examples/github-actions/)，**目前為未啟用狀態**
+> （不在 `.github/workflows/` 底下，GitHub 不會觸發）。啟用方式見[專案檔案結構](#專案檔案結構)的說明。
+
 ### 15.1 全景圖
 
 ```mermaid
@@ -2424,7 +2476,7 @@ flowchart TB
 
 ### 15.3 Pipeline ①：feature-ci（快速回饋）
 
-`.github/workflows/01-feature-ci.yml`
+`ci-examples/github-actions/01-feature-ci.yml`
 
 ```yaml
 name: "① feature-ci"
@@ -2544,7 +2596,7 @@ jobs:
 
 ### 15.4 Pipeline ②：develop-cd（持續整合 → dev 環境）
 
-`.github/workflows/02-develop-cd.yml`
+`ci-examples/github-actions/02-develop-cd.yml`
 
 ```yaml
 name: "② develop-cd"
@@ -2642,7 +2694,7 @@ jobs:
 
 ### 15.5 Pipeline ③：release-cd（發版候選 → staging）
 
-`.github/workflows/03-release-cd.yml`
+`ci-examples/github-actions/03-release-cd.yml`
 
 ```yaml
 name: "③ release-cd"
@@ -2776,7 +2828,7 @@ jobs:
 
 ### 15.6 Pipeline ④：hotfix-cd（快速通道）
 
-`.github/workflows/04-hotfix-cd.yml`
+`ci-examples/github-actions/04-hotfix-cd.yml`
 
 ```yaml
 name: "④ hotfix-cd"
@@ -2882,7 +2934,7 @@ jobs:
 
 ### 15.7 Pipeline ⑤：production-release（正式上線）
 
-`.github/workflows/05-production-release.yml`
+`ci-examples/github-actions/05-production-release.yml`
 
 ```yaml
 name: "⑤ production-release"
@@ -3036,7 +3088,7 @@ jobs:
 
 ### 15.8 Pipeline ⑥：nightly-e2e（深度回歸）
 
-`.github/workflows/06-nightly-e2e.yml`
+`ci-examples/github-actions/06-nightly-e2e.yml`
 
 ```yaml
 name: "⑥ nightly-e2e"
@@ -3497,7 +3549,7 @@ Version: 1.1.0.77f1e19      Branch: main           Environment: prod
 ### A.8 GitHub Actions：GitFlow → K8s 自動部署
 
 完整的 6 條 pipeline 已獨立成[第 15 章](#15-多-pipeline-設計)，
-可執行的檔案在 [`.github/workflows/`](.github/workflows/)。與本附錄相關的重點：
+可執行的檔案在 [`ci-examples/github-actions/`](ci-examples/github-actions/)。與本附錄相關的重點：
 
 | Pipeline | 與 Kind 的關係 |
 |----------|---------------|
