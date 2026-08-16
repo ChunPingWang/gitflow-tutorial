@@ -85,7 +85,11 @@ kubectl -n "$NS" scale deployment/demo-app --replicas="$REPLICAS"
 kubectl -n "$NS" annotate deployment/demo-app \
   "kubernetes.io/change-cause=${BRANCH}@${SHA}" --overwrite >/dev/null
 
-# Ingress 為選用：controller 未就緒時（admission webhook 會拒絕請求）自動略過
+# Ingress 為選用：controller 未安裝或未就緒時自動略過，不讓部署整個失敗
+#
+# ★ host 必須在 apply 之前就換好。若先用 base manifest（預設 host = prod 的 host）
+#   apply、再 patch，ingress-nginx 的 admission webhook 會因為
+#   「host + path 已被其他 namespace 的 Ingress 定義」而直接拒絕。
 INGRESS_OK=false
 if kubectl get ns ingress-nginx >/dev/null 2>&1; then
   echo "  · 等待 ingress-nginx controller 就緒…"
@@ -93,14 +97,18 @@ if kubectl get ns ingress-nginx >/dev/null 2>&1; then
        --for=condition=ready pod \
        --selector=app.kubernetes.io/component=controller \
        --timeout=120s >/dev/null 2>&1; then
-    if kubectl -n "$NS" apply -f k8s/base/ingress.yaml >/dev/null 2>&1; then
-      kubectl -n "$NS" patch ingress demo-app --type=json \
-        -p "[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${HOST}\"}]" >/dev/null
+    TMP_ING="$(mktemp -t demo-ingress.XXXXXX)"
+    sed "s|host: .*|host: ${HOST}|" k8s/base/ingress.yaml > "$TMP_ING"
+    if kubectl -n "$NS" apply -f "$TMP_ING" >/dev/null 2>&1; then
       INGRESS_OK=true
+    else
+      echo "  ⚠️  Ingress 套用失敗，詳情："
+      kubectl -n "$NS" apply -f "$TMP_ING" 2>&1 | sed 's/^/     /' | tail -3
     fi
+    rm -f "$TMP_ING"
   fi
 fi
-$INGRESS_OK || echo "  ⚠️  略過 Ingress（controller 未安裝或未就緒），改用 port-forward 存取"
+$INGRESS_OK || echo "  ⚠️  略過 Ingress，改用 port-forward 存取"
 
 echo "▶ [5/5] 等待滾動更新"
 if ! kubectl -n "$NS" rollout status deployment/demo-app --timeout=180s; then
